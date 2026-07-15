@@ -1,0 +1,658 @@
+---
+tags: [roi-corner-detection, model, architecture, composition, ablation]
+created: 2026-07-15
+updated: 2026-07-15
+---
+
+# 모델 재조립 카테고리 및 비교 설계
+
+이 문서는 PMD OLED fringe 영상의 네 가상 corner 검출 model을 재조립 가능한 component 관점에서
+분류하고, 각 카테고리의 조합 관계와 비교 실험을 정의한다. 방법론의 의미와 출력 표현은
+[methods-codex.md](methods-codex.md), 공통 component와 factory 계약은
+[model-design.md](model-design.md), pretrained backbone과 weight는
+[backbones.md](backbones.md)를 기준으로 한다.
+
+## 1. 문서 목적과 기존 문서 관계
+
+### 1.1. 목적과 범위
+
+이 문서의 목적은 같은 component를 공유하는 model을 하나의 조립 카테고리로 묶고, 변경한
+component가 성능에 미치는 영향을 분리해 비교하는 것이다. Python class 구현이나 최종 registry
+확정은 이 문서의 범위에 포함하지 않는다.
+
+문서가 다루는 항목은 다음과 같다.
+
+- 공통 layer block과 feature interface를 정의한다.
+- custom `reg`, `seg`, `det` model의 component 재사용 관계를 정의한다.
+- composable model, external whole model, refinement, hybrid와 rule-based pipeline을 구분한다.
+- segmentation decoder와 skip connection을 독립적인 실험 축으로 관리한다.
+- 성능 예상은 측정 결과가 아니라 검증할 가설로 기록한다.
+
+### 1.2. 기존 설계 문서와의 역할 분리
+
+관련 문서의 역할은 다음과 같이 분리한다.
+
+| 문서 | 역할 |
+|---|---|
+| `docs/methods-codex.md` | 핵심 아이디어, 출력 표현, loss와 postprocess 중심의 방법론 분류 |
+| `docs/model-design.md` | `FeatureBundle`, model factory와 component interface 계약 |
+| `docs/backbones.md` | backbone architecture, weight 출처와 무결성 정보 |
+| `docs/model-assembly-analysis.md` | 재조립 카테고리, component 조합과 성능 비교 설계 |
+
+같은 method code가 하나의 조립 카테고리에만 속한다고 가정하지 않는다. 예를 들어 `seg`는
+`CustomBackbone + SegDecoder + MaskHead`로 조립하거나 torchvision whole segmentation model로
+구성할 수 있다. 두 model은 같은 target과 최종 corner 계약을 사용하지만 재조립 가능한 경계가
+다르다.
+
+## 2. 재조립 관점의 분류 기준
+
+### 2.1. 1차 축: 모델 조립 형태
+
+1차 분류는 model 내부 component를 프로젝트 factory에서 어느 범위까지 교체할 수 있는지에 따른다.
+
+| category | 조립 형태 | 프로젝트가 교체하는 범위 |
+|---|---|---|
+| A | composable custom model | backbone, adapter, decoder, neck와 head |
+| B | pretrained backbone composable model | pretrained backbone, adapter, decoder와 head |
+| C | external whole model | package model 외부의 adapter와 postprocessor |
+| D | iterative refinement | base prediction 뒤의 refinement model |
+| E | learned geometry hybrid | learned raw output 뒤의 rule-based geometry |
+| F | rule-based pipeline | image processing과 geometry parameter |
+
+Category A와 B는 같은 `FeatureBundle` 계약을 사용한다. Category C는 package 내부 encoder,
+decoder와 head의 결합을 유지한다. Category D와 E는 base model 뒤에 조립되며 Category F에는
+학습 가능한 backbone과 head가 없다.
+
+### 2.2. 2차 축: 출력 표현
+
+2차 분류는 model이 생성하는 raw output과 이를 corner로 변환하는 방식에 따른다.
+
+| output representation | raw output | 대표 method | 기본 postprocess |
+|---|---|---|---|
+| coordinate | `(B, 8)` logits 또는 offsets | `reg` | sigmoid reshape 또는 offset decode |
+| heatmap | `(B, 4, Hh, Wh)` | `heatmap` | soft-argmax |
+| mask | `(B, 1, Hm, Wm)` logits | `seg` | four-side line fitting |
+| line map | structured dense maps | `line` | grouping과 intersection |
+| boxes or points | model별 detection output | `det` | selection, center decode와 ordering |
+| corner offsets | `(B, 4, 2)` offsets | refinement | base corner와 offset 결합 |
+
+조립 형태와 출력 표현은 독립적인 축이다. mask output은 composable custom model과 external whole
+model에서 모두 생성할 수 있고, coordinate output은 custom backbone과 pretrained backbone에서
+같은 head로 생성할 수 있다.
+
+### 2.3. Method, model과 variant의 구분
+
+실험 항목은 다음 수준으로 구분한다.
+
+| 수준 | 의미 | 예시 |
+|---|---|---|
+| method | corner를 예측하는 핵심 표현과 원리 | `reg`, `seg`, `det`, `heatmap`, `line` |
+| model | component의 architecture 조합 | `CustomBackbone + plain decoder + mask head` |
+| variant | loss, postprocess, skip, upsampling이나 freeze 설정 | `skip=add`, `upsample=interpolate_conv` |
+
+`CustomSegModel`은 method 이름이 아니라 custom component를 사용한 `seg` model 조합을 가리키는
+설계 명칭이다. registry에서는 `method.code=seg`, `architecture=composable`, `backbone=custom`처럼
+각 축을 분리해 기록한다.
+
+## 3. 공통 layer block과 feature extraction
+
+### 3.1. 입력부터 후처리까지의 공통 흐름
+
+Composable model의 공통 흐름은 다음과 같다.
+
+```text
+raw image
+-> image preprocessing
+-> images: (B, 3, 224, 224)
+-> backbone
+-> native backbone features
+-> backbone adapter
+-> FeatureBundle
+-> optional decoder or neck
+-> prediction head
+-> raw output
+-> postprocessor
+-> corners, success, failure_reason
+```
+
+학습에서는 image 흐름과 별도로 `BasePreprocessor`가 corner label을 method target으로 변환한다.
+`BaseLoss`는 head의 raw output과 method target을 직접 사용한다.
+
+### 3.2. ConvBlock 계약
+
+`ConvBlock`은 custom encoder, decoder와 neck에서 공유하는 기본 convolution block이다. 특정
+task의 output layer는 포함하지 않는다.
+
+| 항목 | 계약 |
+|---|---|
+| input | `(B, Cin, H, W)` |
+| operation | `Conv2d`, normalization, activation |
+| kernel | 기본 `3 x 3` |
+| stride | feature 유지에는 1, downsampling에는 2 |
+| output | `(B, Cout, Ho, Wo)` |
+| configurable | channel width, stride, normalization과 activation |
+
+Downsampling은 별도 pooling을 암묵적으로 추가하지 않고 block의 stride 설정에 명시한다. 같은
+`ConvBlock` 정의를 `CustomBackbone` stage와 custom detection neck에 재사용하되 각 consumer가
+channel과 stride를 config로 지정한다.
+
+### 3.3. DeconvBlock 계약
+
+`DeconvBlock`은 decoder feature의 해상도를 복원하는 공통 block이다. 이름은 decoder block의
+역할을 나타내며 `ConvTranspose2d`만을 의미하지 않는다.
+
+지원하는 mode는 다음과 같다.
+
+| mode | operation | 기본 여부 | 비교 목적 |
+|---|---|---:|---|
+| `interpolate_conv` | interpolation, `Conv2d`, normalization, activation | 기본 | 안정적인 upsampling baseline |
+| `transposed_conv` | `ConvTranspose2d`, normalization, activation | 조건부 | 학습 가능한 upsampling과 artifact 비교 |
+
+`interpolate_conv`의 기본 scale factor는 2다. decoder는 각 stage의 목표 해상도와 channel을
+명시하고, 입력 크기 때문에 skip feature와 shape가 맞지 않으면 silent crop이나 fallback을 하지
+않고 오류를 반환한다.
+
+### 3.4. CustomBackbone 구조
+
+`CustomBackbone`은 pretrained weight를 사용하지 않는 project baseline encoder다. config registry
+값은 기존 계약과 같이 `custom`을 유지한다.
+
+기본 구조는 다음과 같다.
+
+```text
+images
+-> stem ConvBlock
+-> encoder stage 1
+-> encoder stage 2 with downsampling
+-> encoder stage 3 with downsampling
+-> encoder stage 4 with downsampling
+-> native final feature and stage features
+```
+
+첫 baseline은 네 encoder stage와 output stride 16을 사용한다. 각 stage는 하나 이상의
+`ConvBlock`으로 구성하고 channel width, block 반복 수, normalization과 activation은 config에
+기록한다. `CustomBackbone`은 coordinate, segmentation과 custom detection model에서 공유하며
+task-specific decoder와 head를 포함하지 않는다.
+
+### 3.5. Backbone, adapter와 FeatureExtractor의 경계
+
+`CustomBackbone`과 `FeatureExtractor`는 동의어가 아니다. component 경계는 다음과 같다.
+
+| component | 입력 | 출력 | 책임 |
+|---|---|---|---|
+| `CustomBackbone` | image tensor | native final feature와 stage features | custom encoder 계산 |
+| backbone adapter | native features | `global`, `spatial`, `stages` | 공통 의미와 layout으로 변환 |
+| `FeatureSpec` | model 생성 metadata | channel, stride와 capability | 조합 가능 여부 검증 |
+| `FeatureExtractor` | image tensor | `FeatureBundle` | backbone, adapter와 spec 조립 |
+
+Adapter는 모든 backbone의 channel과 spatial size를 강제로 같게 만들지 않는다. decoder, neck와
+head factory는 `FeatureSpec`을 읽고 필요한 projection을 생성한다.
+
+## 4. Category A: Composable custom model
+
+### 4.1. 공통 조립 구조
+
+Category A는 `CustomBackbone`의 feature를 공통 adapter로 변환하고 task component를 조립한다.
+
+```text
+CustomBackbone
+-> backbone adapter
+-> FeatureBundle
+-> task-specific decoder or neck
+-> PredictionHead
+-> raw output
+```
+
+Category A의 주요 조합은 다음과 같다.
+
+| 설계 명칭 | 조합 |
+|---|---|
+| `CustomRegModel` | `CustomBackbone + adapter + coord_gap/coord_spatial head` |
+| `CustomSegModel` | `CustomBackbone + adapter + SegDecoder + MaskHead` |
+| `CustomDetModel` | `CustomBackbone + adapter + multi-scale neck + DetectionHead` |
+
+### 4.2. CustomRegModel 조합
+
+`CustomRegModel`은 decoder 없이 `FeatureBundle`의 `global` 또는 `spatial` field에서 coordinate를
+예측한다.
+
+| variant | feature | head 구성 | raw output |
+|---|---|---|---|
+| `coord_gap` | `global` | dropout과 linear projection | `(B, 8)` |
+| `coord_spatial` | `spatial` | projection, adaptive spatial pooling과 MLP | `(B, 8)` |
+
+두 variant는 같은 `CustomBackbone`, corner target, loss와 postprocess를 사용한다. 비교에서는
+global aggregation과 spatial information 유지의 차이를 검증한다.
+
+### 4.3. CustomSegModel 조합
+
+`CustomSegModel`은 `FeatureBundle` 뒤에 독립 `SegDecoder`와 `MaskHead`를 조립한다.
+
+```text
+FeatureBundle.spatial and optional stages
+-> SegDecoder
+-> decoded spatial feature
+-> MaskHead
+-> mask logits: (B, 1, Hm, Wm)
+```
+
+`MaskHead`는 최종 channel projection만 담당한다. 해상도 복원과 skip fusion은 `SegDecoder`의
+책임이며 target 생성, BCE와 Dice loss, threshold와 geometry fitting은 model 밖에서 관리한다.
+
+### 4.4. CustomDetModel 조합
+
+`CustomDetModel`은 `FeatureBundle.stages`를 사용해 multi-scale neck과 detection head를 조립한다.
+
+| component | 책임 |
+|---|---|
+| multi-scale neck | stage channel projection과 multi-scale feature 생성 |
+| detection head | corner class, box 또는 point raw output 생성 |
+| detection postprocessor | confidence selection, center decode와 corner ordering |
+
+Custom detection은 external YOLO, torchvision detector나 DETR whole model과 구분한다. 외부 model의
+internal loss와 호출 규약은 Category C의 adapter가 처리한다.
+
+### 4.5. 공통 block 재사용 관계
+
+Custom model별 block 재사용 관계는 다음과 같다.
+
+| component | custom `reg` | custom `seg` | custom `det` |
+|---|---:|---:|---:|
+| `ConvBlock` | 사용 | 사용 | 사용 |
+| `DeconvBlock` | 미사용 | 사용 | neck에 따라 조건부 |
+| `CustomBackbone` | 사용 | 사용 | 사용 |
+| backbone adapter | 사용 | 사용 | 사용 |
+| dense decoder | 미사용 | 사용 | 미사용 |
+| multi-scale neck | 미사용 | 미사용 | 사용 |
+| task head | coordinate | mask | detection |
+
+같은 `CustomBackbone` checkpoint를 여러 method에 그대로 재사용한다는 의미는 아니다. target과
+gradient가 다르므로 공정 비교에서는 같은 initialization을 사용하고 method별로 별도 학습한다.
+
+## 5. CustomSegModel과 decoder variant
+
+`CustomSegModel`은 U-Net architecture로 고정하지 않는다. U-Net은 교체 가능한 `SegDecoder`
+variant이며 skip connection은 별도의 실험 속성으로 기록한다.
+
+기본 config 표현은 다음과 같다.
+
+```yaml
+model:
+  architecture: composable
+  backbone: custom
+  decoder:
+    name: unet
+    upsample: interpolate_conv
+    skip_connection: add
+  head: mask
+```
+
+### 5.1. Plain decoder
+
+`decoder.name=plain`은 마지막 `spatial` feature만 사용한다. encoder의 `stages`를 skip feature로
+사용하지 않는다.
+
+```text
+FeatureBundle.spatial
+-> repeated DeconvBlocks
+-> decoded feature
+-> MaskHead
+```
+
+Plain decoder는 가장 작은 dense baseline이며 multi-scale encoder feature의 효과를 측정하는 기준이
+된다. `skip_connection`은 `none`만 허용한다.
+
+### 5.2. U-Net additive skip decoder
+
+`decoder.name=unet`, `skip_connection=add`는 decoder feature와 같은 해상도의 encoder stage를
+channel projection한 뒤 element-wise addition으로 결합한다.
+
+```text
+decoder feature
+-> DeconvBlock
+-> add projected encoder stage
+-> ConvBlock
+```
+
+Additive skip은 fusion 뒤 channel 수를 증가시키지 않는다. skip connection의 기본 후보로 사용하고
+plain decoder와 첫 기준 비교를 수행한다.
+
+### 5.3. U-Net concatenation skip decoder
+
+`decoder.name=unet`, `skip_connection=concat`은 decoder feature와 projected encoder stage를 channel
+dimension으로 결합한 뒤 `ConvBlock`으로 projection한다.
+
+```text
+decoder feature
+-> DeconvBlock
+-> concatenate projected encoder stage
+-> ConvBlock with channel projection
+```
+
+Concatenation은 더 많은 feature를 보존하지만 parameter, memory와 latency가 증가할 수 있다. 첫
+baseline이 아니라 additive skip 이후의 ablation으로 평가한다.
+
+### 5.4. FPN decoder
+
+`decoder.name=fpn`은 여러 encoder stage에 lateral projection을 적용하고 top-down feature와
+결합한다. segmentation과 custom detection에서 multi-scale 설계 원칙을 공유할 수 있지만 각
+task의 neck 또는 decoder instance와 head는 분리한다.
+
+FPN은 plain과 U-Net baseline이 안정된 뒤 조건부 variant로 평가한다. ViT와 DINOv2처럼 native
+multi-stage feature가 없는 backbone에는 별도 intermediate feature 계약 없이 적용하지 않는다.
+
+### 5.5. Skip connection ablation
+
+허용 decoder 조합은 다음과 같다.
+
+| decoder | skip 설정 | 입력 feature | 초기 상태 |
+|---|---|---|---|
+| `plain` | `none` | 마지막 `spatial` | 기준 지원 |
+| `unet` | `add` | `spatial`, `stages` | 기본 후보 |
+| `unet` | `concat` | `spatial`, `stages` | 추가 ablation |
+| `fpn` | lateral connection | 여러 `stages` | 조건부 |
+
+Skip connection 효과를 비교할 때 고정하는 조건은 다음과 같다.
+
+- 같은 `CustomBackbone` 구조와 initialization을 사용한다.
+- decoder stage 수, 목표 출력 해상도와 `MaskHead`를 고정한다.
+- mask target, BCE와 Dice loss, optimizer, data split과 seed를 고정한다.
+- 같은 postprocessor와 threshold를 사용한다.
+- parameter 수, FLOPs, CPU/GPU latency와 peak memory를 함께 기록한다.
+
+첫 비교는 `plain + interpolate_conv`와 `unet + add + interpolate_conv`다. `unet + concat`, FPN과
+`transposed_conv`는 각각 독립 ablation으로 수행한다. mask Dice와 BCE뿐 아니라 Polygon IoU,
+MCD, MaxCD, PCK와 SR을 함께 보고해 mask 품질과 최종 geometry 품질을 분리한다.
+
+## 6. Category B: Pretrained backbone composable model
+
+### 6.1. CNN과 Transformer adapter 조합
+
+Category B는 pretrained backbone을 사용하지만 project의 adapter, decoder와 head를 조립한다.
+
+| backbone family | adapter output | 주요 조합 |
+|---|---|---|
+| ResNet | `global`, `spatial`, `stages` | coordinate, dense decoder와 custom detection |
+| MobileNet/EfficientNet | `global`, `spatial`, 제한된 `stages` | coordinate와 lightweight dense model |
+| ViT/DINOv2 | `global`, token-grid `spatial` | coordinate와 조건부 single-scale decoder |
+| Swin | `global`, `spatial`, `stages` | coordinate와 multi-stage dense decoder |
+
+Adapter는 native feature의 의미와 layout을 통일하며 channel projection과 task output은 decoder,
+neck 또는 head가 담당한다.
+
+### 6.2. Backbone-head compatibility
+
+초기 compatibility는 다음과 같다.
+
+| backbone family | coordinate | plain dense | U-Net/FPN dense | custom detection |
+|---|---:|---:|---:|---:|
+| `CustomBackbone` | 지원 | 지원 | 지원 | 지원 |
+| ResNet | 지원 | 지원 | 지원 | 지원 |
+| MobileNet/EfficientNet | 지원 | 지원 | 조건부 | 조건부 |
+| ViT/DINOv2 | 지원 | 조건부 | 초기 제외 | 초기 제외 |
+| Swin | 지원 | 지원 | 지원 | 조건부 |
+
+`stages`가 필요한 decoder나 neck은 해당 capability가 없는 backbone에서 생성 단계에 실패해야 한다.
+Factory는 single-scale feature를 multi-stage feature처럼 조용히 복제하지 않는다.
+
+### 6.3. CustomBackbone과 pretrained backbone 비교
+
+Backbone 비교에서는 method, head, decoder, target, loss, postprocess, input size, optimizer와 data
+split을 고정한다. Pretrained 여부, pretrained dataset, parameter 수와 latency는 결과 metadata에
+기록한다.
+
+`CustomBackbone`은 pretrained prior가 없는 project baseline이고 pretrained CNN과 Transformer는
+data efficiency 가설을 검증하는 variant다. 서로 다른 pretrained 상태의 결과를 architecture 효과로만
+해석하지 않는다.
+
+## 7. Category C: External whole model
+
+### 7.1. Whole-model adapter의 경계
+
+External whole model은 encoder, decoder, neck와 head를 generic component로 강제 분해하지 않는다.
+`ExternalWholeModelAdapter`가 package별 호출 규약과 native output을 공통 raw-output contract로
+변환한다.
+
+```text
+images and optional native targets
+-> external whole model
+-> package-native output or internal loss
+-> ExternalWholeModelAdapter
+-> common raw-output contract
+```
+
+### 7.2. Segmentation, detection과 DETR 조합
+
+External whole-model 대상은 다음과 같다.
+
+| family | 예시 | 프로젝트가 교체하는 범위 |
+|---|---|---|
+| segmentation | FCN, DeepLabV3, LR-ASPP | output adapter와 mask postprocessor |
+| detection | Faster R-CNN, RetinaNet, YOLO | class mapping과 corner postprocessor |
+| set prediction | DETR box, 조건부 DETR point | query selection과 corner ordering |
+
+Whole model의 internal loss를 사용하는 경우 `BaseWrapper` adapter가 loss dictionary를 공통 trainer에
+연결한다. Evaluator에는 package-native output을 직접 전달하지 않는다.
+
+### 7.3. 교체 가능한 요소와 제한 사항
+
+External whole model에서도 preprocess, final postprocess와 refinement는 비교할 수 있다. 반면 package
+내부 encoder나 decoder만 교체하는 실험은 별도 integration 없이 composable model 비교에 포함하지
+않는다.
+
+Whole model의 성능 비교에는 weight 출처, pretrained task, dependency version, license, model size와
+end-to-end latency를 기록한다.
+
+## 8. Category D: Iterative refinement
+
+### 8.1. Base prediction과 refinement 조합
+
+Refinement는 image만 입력받는 base method가 아니라 image와 initial corners를 함께 사용한다.
+
+```text
+base model
+-> initial corners
+image and initial corners
+-> RefinementModel
+-> corner offsets
+-> refined corners
+```
+
+Base prediction과 refinement prediction을 별도 checkpoint와 결과 column으로 기록해 base 성능과
+추가 이득을 분리한다.
+
+### 8.2. Local STN과 GCN
+
+Refinement variant의 차이는 다음과 같다.
+
+| refinement | 입력 정보 | 출력 | 주요 비용 |
+|---|---|---|---|
+| `local_stn` | corner 주변 local image feature | local offsets | ROI sampling과 local encoder |
+| `gcn` | initial polygon과 image feature | iterative offsets | graph 연산과 반복 step |
+
+`local_stn` patch는 가상 corner 주변의 두 직선 변을 포함할 만큼 충분히 커야 한다. Sharp physical
+corner가 존재한다고 가정하지 않는다.
+
+### 8.3. Base method compatibility
+
+Refinement compatibility는 다음과 같다.
+
+| base output | `local_stn` | `gcn` |
+|---|---:|---:|
+| coordinate regression | 지원 | 지원 |
+| heatmap corners | 지원 | 지원 |
+| segmentation fitting corners | 지원 | 지원 |
+| detection corners | 지원 | 지원 |
+| 실패한 postprocess | 미적용 | 미적용 |
+
+같은 stored base prediction에 refinement를 적용하고 base model을 다시 학습하지 않는다. Joint
+training은 별도 experiment로 분리한다.
+
+## 9. Category E: Learned geometry hybrid
+
+### 9.1. Learned output과 geometry postprocess
+
+Hybrid는 별도 backbone architecture가 아니라 learned raw output과 rule-based geometry의 조합이다.
+
+```text
+learned dense model
+-> mask or line raw output
+-> rule-based geometry postprocessor
+-> corners, success, failure_reason
+```
+
+Model accuracy와 geometry postprocess accuracy를 분리하기 위해 raw prediction을 저장하고 같은 raw
+output에 여러 postprocessor를 적용한다.
+
+### 9.2. Segmentation postprocess variant
+
+초기 segmentation postprocess 비교는 다음과 같다.
+
+| postprocess | 핵심 계산 | 예상 실패 원인 |
+|---|---|---|
+| four-side fitting | 네 직선 변 fitting과 intersection | boundary sample 부족, 잘못된 side grouping |
+| contour approximation | contour polygon 근사 | rounded corner와 holder 접촉부 |
+| 조건부 line refinement | mask boundary band 내부 line fitting | fringe 또는 glare에 의한 false line |
+
+Threshold와 geometry parameter는 validation set에서 확정하고 test set에서 변경하지 않는다.
+
+### 9.3. 동일 checkpoint 기반 비교
+
+Postprocess 비교는 같은 mask logits 또는 저장된 probability map을 입력으로 사용한다. 각 variant는
+성공 표본의 정확도만 보고하지 않고 전체 SR, 실패 원인 분포와 end-to-end latency를 함께 보고한다.
+
+## 10. Category F: Rule-based pipeline
+
+### 10.1. Classical contour pipeline
+
+Classical contour pipeline은 학습 model 없이 modulation mask와 boundary geometry에서 corner를
+계산한다.
+
+```text
+image
+-> fringe-aware preprocessing
+-> modulation or panel mask
+-> boundary sampling
+-> four-side fitting
+-> corners
+```
+
+### 10.2. Classical line pipeline
+
+Classical line pipeline은 fringe suppression 뒤에 panel boundary line을 선택한다.
+
+```text
+image
+-> fringe suppression
+-> boundary-focused line candidates
+-> orientation grouping
+-> line intersections
+-> corners
+```
+
+### 10.3. 고정 parameter와 실패 처리
+
+Classical parameter는 validation set에서 확정하고 test set에서 표본별로 변경하지 않는다. 실패
+가능 조건은 명시적 reason code로 반환한다.
+
+| failure | 예시 reason |
+|---|---|
+| 충분한 boundary 또는 line 후보가 없음 | `insufficient_candidates` |
+| 네 side group을 구성할 수 없음 | `side_grouping_failed` |
+| intersection이 image 밖에 있음 | `out_of_bounds` |
+| polygon이 convex하지 않음 | `non_convex_polygon` |
+
+## 11. 카테고리 간 compatibility와 성능 비교
+
+### 11.1. 블록 포함 및 공유 관계
+
+카테고리별 block 포함 관계는 다음과 같다.
+
+| category | backbone | adapter | decoder or neck | head | geometry postprocess | refinement |
+|---|---:|---:|---:|---:|---:|---:|
+| A composable custom | custom | 사용 | 선택 | 사용 | method별 | 선택 |
+| B pretrained composable | pretrained | 사용 | 선택 | 사용 | method별 | 선택 |
+| C external whole model | model 내부 | external adapter | model 내부 | model 내부 | 사용 | 선택 |
+| D iterative refinement | base model 사용 | base model 사용 | refinement 내부 | offset head | offset decode | 자체 category |
+| E learned hybrid | base model 사용 | base model 사용 | base model 사용 | base model 사용 | 핵심 component | 선택 |
+| F rule-based | 미사용 | 미사용 | 미사용 | 미사용 | 전체 pipeline | 조건부 |
+
+### 11.2. 지원 조합과 금지 조합
+
+Factory와 experiment config는 다음 조합 규칙을 적용한다.
+
+| 요청 조합 | 처리 |
+|---|---|
+| `coord_gap`과 `global` capability | 허용 |
+| `coord_spatial`과 `spatial` capability | 허용 |
+| U-Net/FPN과 `stages` capability | 허용 |
+| U-Net/FPN과 `stages=null` | 생성 오류 |
+| `plain` decoder와 `skip_connection=add/concat` | 생성 오류 |
+| coordinate head와 dense decoder | 생성 오류 |
+| external whole model과 generic internal head 교체 | 생성 오류 |
+| 실패한 base corners와 refinement | 표본별 미적용 |
+
+지원하지 않는 조합은 silent fallback하지 않는다. 오류에는 요청한 component, 필요한 capability와
+실제 `FeatureSpec`을 포함한다.
+
+### 11.3. 카테고리별 성능 가설
+
+다음 내용은 benchmark 결과가 아니라 검증할 가설이다.
+
+| 조합 | 정확도와 강건성 가설 | 배포 비용 가설 | 주요 위험 |
+|---|---|---|---|
+| custom coordinate | dominant panel에서 강한 기준선 | 작고 빠름 | local boundary 정보 손실 |
+| heatmap | corner confidence와 위치 표현에 유리 | decoder 비용 발생 | heatmap 해상도 한계 |
+| plain segmentation | mask 기반 geometry 분리에 유리 | 중간 | 경계 세부 정보 손실 |
+| U-Net segmentation | 고해상도 boundary 복원 가능 | memory와 latency 증가 | fringe texture 전달 |
+| custom detection | corner별 confidence 제공 | neck과 head 비용 | small box와 ordering 문제 |
+| external whole model | pretrained prior 활용 | 대체로 큼 | 원래 task와 interface 불일치 |
+| refinement | systematic corner bias 감소 가능 | 추가 latency | 잘못된 initial corner 의존 |
+| classical | 빠르고 설명 가능 | 가장 작음 | illumination과 threshold 민감도 |
+
+### 11.4. 단계별 ablation matrix
+
+비교 실험은 다음 순서로 수행한다.
+
+| 단계 | 고정 요소 | 변경 요소 | 목적 |
+|---|---|---|---|
+| 1 | `CustomBackbone`, target, loss와 postprocess | `coord_gap`, `coord_spatial` | global과 spatial head 비교 |
+| 2 | `CustomBackbone`, mask head와 training | plain, U-Net add | skip connection 기본 효과 |
+| 3 | U-Net stage와 training | add, concat | skip fusion 방식 비교 |
+| 4 | U-Net add와 training | `interpolate_conv`, `transposed_conv` | upsampling 방식 비교 |
+| 5 | head와 training | custom, ResNet, ViT, Swin backbone | backbone prior와 architecture 비교 |
+| 6 | raw mask checkpoint | geometry postprocessor | model과 postprocess 효과 분리 |
+| 7 | stored base corners | refinement 없음, local STN, GCN | refinement 순수 이득 비교 |
+| 8 | dataset과 final metric | composable, external, classical | category 간 end-to-end 비교 |
+
+모든 단계는 Polygon IoU, MCD, MaxCD, Reprojection Error, PCK@0.02, PCK@0.05, SR, CPU/GPU
+latency와 model size를 보고한다. Dense model에는 raw representation metric을 추가하되 최종 선택은
+공통 corner metric과 SR을 기준으로 한다.
+
+## 12. 모델 선택 기준과 열린 결정
+
+### 12.1. 정확도와 subpixel precision 중심 선택
+
+정확도 중심 선택에서는 MCD 평균만 사용하지 않는다. MaxCD, Reprojection Error, PCK@0.02와 SR을
+함께 보고하고 measured data에서 일관된 개선이 있는지 확인한다. Refinement는 base model보다 모든
+주요 corner metric에서 개선되면서 SR을 낮추지 않을 때 채택한다.
+
+### 12.2. CPU latency와 model size 중심 선택
+
+배포 후보는 preprocess, model inference와 postprocess를 포함한 end-to-end CPU latency로 비교한다.
+동일 정확도 범위에서는 parameter 수, serialized model size, peak memory와 failure handling이 작은
+조합을 우선한다.
+
+### 12.3. 구현 전 확정할 항목
+
+다음 항목은 baseline 결과를 확인한 뒤 확정한다.
+
+- `CustomBackbone`의 stage channel width와 block 반복 수를 확정한다.
+- segmentation 기본 decoder를 plain과 U-Net additive skip 중에서 선택한다.
+- U-Net concatenation과 FPN을 정식 registry에 포함할지 결정한다.
+- Custom detection neck과 point 또는 box representation을 확정한다.
+- refinement의 joint training을 별도 연구 실험으로 진행할지 결정한다.
+
+기본 가정은 `DeconvBlock.mode=interpolate_conv`이며 additive skip U-Net은 segmentation 기본 후보일
+뿐 확정 default가 아니다. 실제 default는 plain과 U-Net additive skip의 measured benchmark 이후에
+선택한다.
