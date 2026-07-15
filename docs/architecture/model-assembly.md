@@ -1,48 +1,109 @@
 ---
-tags: [roi-corner-detection, model, architecture, composition, ablation]
+tags: [roi-corner-detection, model, architecture, composition, ablation, ssot]
+status: canonical
 created: 2026-07-15
 updated: 2026-07-15
 ---
 
 # 모델 재조립 카테고리 및 비교 설계
 
-이 문서는 PMD OLED fringe 영상의 네 가상 corner 검출 model을 재조립 가능한 component 관점에서
-분류하고, 각 카테고리의 조합 관계와 비교 실험을 정의한다. 방법론의 의미와 출력 표현은
-[methods-codex.md](methods-codex.md), 공통 component와 factory 계약은
-[model-design.md](model-design.md), pretrained backbone과 weight는
-[backbones.md](backbones.md)를 기준으로 한다.
+이 문서는 PMD OLED fringe 영상의 네 가상 corner 검출에 대한 프로젝트 전체 설계의 단일 기준
+문서다. 공통 계약, 도메인 제약, data stage, method registry, model 조립, 평가와 ablation 설계를
+함께 정의한다. Pretrained weight의 파일 목록과 출처는
+[backbones.md](../references/backbones.md)에서 사실 정보로만 관리한다.
 
-## 1. 문서 목적과 기존 문서 관계
+## 1. 문서 governance와 공통 계약
 
-### 1.1. 목적과 범위
+### 1.1. Canonical status
 
-이 문서의 목적은 같은 component를 공유하는 model을 하나의 조립 카테고리로 묶고, 변경한
-component가 성능에 미치는 영향을 분리해 비교하는 것이다. Python class 구현이나 최종 registry
-확정은 이 문서의 범위에 포함하지 않는다.
+이 문서는 architecture, method registry, experiment comparison의 유일한 SSOT다. 구현, config와
+새 문서는 이 문서의 용어와 계약을 따라야 한다. 이전 방법론 및 model 설계 문서는 historical
+reference이며 이 문서와 충돌할 때는 이 문서가 우선한다.
 
-문서가 다루는 항목은 다음과 같다.
+문서 상태는 다음과 같이 구분한다.
 
-- 공통 layer block과 feature interface를 정의한다.
-- custom `reg`, `seg`, `det` model의 component 재사용 관계를 정의한다.
-- composable model, external whole model, refinement, hybrid와 rule-based pipeline을 구분한다.
-- segmentation decoder와 skip connection을 독립적인 실험 축으로 관리한다.
-- 성능 예상은 측정 결과가 아니라 검증할 가설로 기록한다.
+| 문서 | 상태 | 역할 |
+|---|---|---|
+| `docs/architecture/model-assembly.md` | canonical | 프로젝트 전체 설계와 비교 기준 |
+| `docs/references/backbones.md` | reference | weight 출처, checksum과 파일 정보 |
+| `docs/deprecated/*.md` | deprecated | 이전 후보안과 historical mapping |
 
-### 1.2. 기존 설계 문서와의 역할 분리
+### 1.2. 범위와 용어
 
-관련 문서의 역할은 다음과 같이 분리한다.
+이 문서는 같은 component를 공유하는 model을 조립 카테고리로 묶고 변경한 component가 성능에
+미치는 영향을 분리해 비교한다. Python class 구현은 이 문서의 범위에 포함하지 않지만 public
+registry와 component contract는 이 문서에서 확정한다.
 
-| 문서 | 역할 |
-|---|---|
-| `docs/methods-codex.md` | 핵심 아이디어, 출력 표현, loss와 postprocess 중심의 방법론 분류 |
-| `docs/model-design.md` | `FeatureBundle`, model factory와 component interface 계약 |
-| `docs/backbones.md` | backbone architecture, weight 출처와 무결성 정보 |
-| `docs/model-assembly-analysis.md` | 재조립 카테고리, component 조합과 성능 비교 설계 |
+실험 항목은 다음 수준으로 구분한다.
+
+| 수준 | 의미 | 예시 |
+|---|---|---|
+| method | corner를 예측하는 핵심 표현과 원리 | `reg`, `seg`, `det`, `heatmap`, `line` |
+| model | component의 architecture 조합 | `CustomBackbone + plain decoder + mask head` |
+| variant | loss, postprocess, skip, upsampling 또는 freeze 설정 | `skip=add`, `upsample=interpolate_conv` |
 
 같은 method code가 하나의 조립 카테고리에만 속한다고 가정하지 않는다. 예를 들어 `seg`는
 `CustomBackbone + SegDecoder + MaskHead`로 조립하거나 torchvision whole segmentation model로
 구성할 수 있다. 두 model은 같은 target과 최종 corner 계약을 사용하지만 재조립 가능한 경계가
 다르다.
+
+### 1.3. 공통 입출력과 평가 계약
+
+모든 method는 내부 표현과 관계없이 다음 계약을 지킨다.
+
+| 항목 | 계약 |
+|---|---|
+| image input | `(B, 3, H, W)`, 기본 `H = W = 224`, ImageNet normalization |
+| corner target | `(B, 4, 2)`, `[0, 1]`, `TL`, `TR`, `BR`, `BL` 순서 |
+| final output | `(B, 4, 2)` corners와 표본별 success, failure reason |
+| corner ordering | method 경계에서 한 번만 정규화 |
+| CSV | `image_dir,image_name,x1,y1,x2,y2,x3,y3,x4,y4` |
+| experiment output | `outputs/<dataset>/<method>/<model>/<exp_name>/` |
+
+모든 raw output은 method별 postprocessor를 거쳐 표준 corner로 변환한다. 실패 가능한
+postprocess는 성공 여부와 failure reason을 반환하고 evaluator는 실패 표본을 평균에서 조용히
+제외하지 않는다.
+
+공통 metric bank는 다음과 같다.
+
+| metric | 평가 관점 | 좋은 방향 |
+|---|---|---|
+| Polygon IoU | 사각형 영역 일치도 | 클수록 좋음 |
+| MCD | 평균 corner 좌표 오차 | 작을수록 좋음 |
+| MaxCD | 가장 큰 단일 corner 오차 | 작을수록 좋음 |
+| Reprojection Error | homography 기반 복원 오차 | 작을수록 좋음 |
+| PCK@0.02, PCK@0.05 | 거리 임계값 안의 corner 비율 | 클수록 좋음 |
+| SR | 유효한 네 corner를 반환한 비율 | 클수록 좋음 |
+| CPU/GPU latency | preprocess, inference, postprocess를 포함한 비용 | 작을수록 좋음 |
+| Model size | 저장과 배포 비용 | 작을수록 좋음 |
+
+### 1.4. 도메인 제약과 data stage
+
+대상은 rounded OLED panel의 단일 방향 fringe 영상이며 label corner는 실제 sharp pixel corner가
+아닌 네 직선 변의 연장 교점이다. 따라서 panel 내부 fringe는 영역 단서일 수 있지만 raw line
+detector에는 false boundary를 만들 수 있고 `cornerSubPix`는 기본 refinement가 아니다.
+
+공통 도메인 제약은 다음과 같다.
+
+| 코드 | 제약 |
+|---|---|
+| F1 | 대상은 axis-aligned box가 아닌 convex quadrilateral이다. |
+| F2 | reference quadrilateral 면적은 target-domain profile에서 약 30-46%다. 이 값은 test-time area rejection 조건이 아니다. |
+| F3 | 네 corner는 image 경계 안에 있다. |
+| F4 | measured data는 적고 synthetic data는 많다. |
+| F5 | phase restoration을 위해 subpixel precision이 중요하다. |
+| F6 | CPU latency와 model size의 배포 제약이 있다. |
+| F7 | illumination, glare, vignette 변화가 존재한다. |
+| F8 | panel occlusion은 없고 네 corner가 관측된다. |
+| F9 | 모든 method는 공통 입출력과 평가 계약을 준수한다. |
+
+학습 data는 다음 세 논리 stage로 관리한다.
+
+| stage | 목적 |
+|---|---|
+| `public` | 공개 corner dataset에서 일반 corner 표현을 학습한다. |
+| `synthetic` | fringe pattern과 광학 변동으로 target domain에 적응한다. |
+| `measured` | 소량의 PMD data로 fine-tuning과 최종 평가를 수행한다. |
 
 ## 2. 재조립 관점의 분류 기준
 
@@ -80,19 +141,62 @@ decoder와 head의 결합을 유지한다. Category D와 E는 base model 뒤에 
 model에서 모두 생성할 수 있고, coordinate output은 custom backbone과 pretrained backbone에서
 같은 head로 생성할 수 있다.
 
-### 2.3. Method, model과 variant의 구분
+### 2.3. Model source와 usage
 
-실험 항목은 다음 수준으로 구분한다.
+Model source와 재사용 범위는 method와 별도 축으로 기록한다.
 
-| 수준 | 의미 | 예시 |
+| source | 의미 |
+|---|---|
+| `torchvision` | `torchvision.models` backbone 또는 whole model을 사용한다. |
+| `external` | timm, Ultralytics 또는 external repository model을 사용한다. |
+| `custom` | 전체 architecture를 project에서 직접 구현한다. |
+| `none` | 학습 가능한 model이 없는 rule-based pipeline이다. |
+
+| usage | 의미 |
+|---|---|
+| `backbone_only` | backbone만 재사용하고 task component를 직접 구현한다. |
+| `whole_model` | segmentation 또는 detection model 전체를 재사용한다. |
+| `adapter` | pretrained model을 동결하거나 부분 동결하고 작은 adapter 또는 head를 학습한다. |
+| `from_scratch` | 전체 network를 처음부터 학습한다. |
+
+### 2.4. Current method registry와 historical mapping
+
+현재 registry는 다음 method를 사용한다.
+
+| current method | 핵심 표현 | 기본 조립 또는 postprocess |
 |---|---|---|
-| method | corner를 예측하는 핵심 표현과 원리 | `reg`, `seg`, `det`, `heatmap`, `line` |
-| model | component의 architecture 조합 | `CustomBackbone + plain decoder + mask head` |
-| variant | loss, postprocess, skip, upsampling이나 freeze 설정 | `skip=add`, `upsample=interpolate_conv` |
+| `reg` | coordinate 또는 homography offset | coordinate head와 sigmoid 또는 offset decode |
+| `seg` | binary panel mask | dense decoder, mask head와 four-side fitting |
+| `det` | corner box 또는 point | custom head 또는 whole-model adapter |
+| `heatmap` | four corner heatmaps | dense decoder와 soft-argmax |
+| `line` | boundary geometry maps | grouping과 intersection |
+| refinement | initial corner offsets | `local_stn` 또는 `gcn` |
+| rule-based | contour 또는 line candidates | classical geometry pipeline |
 
-`CustomSegModel`은 method 이름이 아니라 custom component를 사용한 `seg` model 조합을 가리키는
-설계 명칭이다. registry에서는 `method.code=seg`, `architecture=composable`, `backbone=custom`처럼
-각 축을 분리해 기록한다.
+이전 문서의 이름은 historical reference에서만 다음처럼 해석한다.
+
+| previous name | current registry 표현 |
+|---|---|
+| `direct` | `reg`, `target=corners` |
+| `homography` | `reg`, `target=homography_offsets` |
+| `vit_direct` | `reg`, ViT 또는 Swin backbone variant |
+| `foundation` | `reg`, DINOv2 backbone과 `freeze=true` variant |
+| `torchseg` | `seg`, `usage=whole_model` variant |
+| `torchdet`, `yolo`, `detr_box` | `det`, external whole-model variant |
+| `gcn`, `local_stn` | refinement variant |
+| `classical_contour`, `classical_line` | rule-based pipeline variant |
+
+### 2.5. Complexity 기록 원칙
+
+구현 복잡도는 architecture, training, dependency와 postprocess를 분리해 기록한다. External model은
+설치 가능 여부가 아니라 trainer, checkpoint와 evaluator adapter 비용까지 포함해 평가한다.
+
+| 등급 | 기준 |
+|---|---|
+| 낮음 | 단일 output, 단일 loss, 결정적 postprocess, 외부 의존이 거의 없다. |
+| 중간 | dense target, decoder, 복합 loss 또는 geometry postprocess가 필요하다. |
+| 높음 | 반복 refinement, 실패 가능한 postprocess 또는 외부 weight가 필요하다. |
+| 매우 높음 | external repository 통합 또는 native interface와 큰 차이가 있다. |
 
 ## 3. 공통 layer block과 feature extraction
 

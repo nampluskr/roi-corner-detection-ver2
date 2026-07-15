@@ -1,10 +1,16 @@
 ---
 tags: [roi-corner-detection, methodology, classification]
+status: deprecated
+superseded_by: ../architecture/model-assembly.md
 created: 2026-07-12
-updated: 2026-07-12
+updated: 2026-07-15
 ---
 
 # 방법론 분류 체계
+
+이 문서는 historical 후보 catalog다. 현재 프로젝트 설계의 기준은
+[model-assembly.md](../architecture/model-assembly.md)이며, 이 문서의 method 분류와 우선순위는
+새 구현 또는 실험의 근거로 사용하지 않는다.
 
 이 문서는 평면 사각형 객체의 네 코너를 검출하는 방법론을 핵심 아이디어와 구현 복잡도에
 따라 분류하고, 각 방법론의 model source, backbone, loss, postprocess, refinement를 독립된

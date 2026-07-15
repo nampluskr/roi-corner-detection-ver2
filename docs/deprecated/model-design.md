@@ -1,16 +1,21 @@
 ---
 tags: [roi-corner-detection, model, architecture, composition]
+status: deprecated
+superseded_by: ../architecture/model-assembly.md
 created: 2026-07-13
 updated: 2026-07-15
 ---
 
 # 모델 구성 및 조립 설계
 
+이 문서는 historical model 설계안이다. 현재 프로젝트 설계의 기준은
+[model-assembly.md](../architecture/model-assembly.md)이며, 이 문서의 component, registry와
+구현 순서는 새 구현 또는 실험의 근거로 사용하지 않는다.
+
 이 문서는 PMD OLED fringe 영상에서 네 가상 corner를 검출하는 model을 공통 component로
-구성하는 방법을 정의한다. 방법론의 의미와 비교 축은 [methods-codex.md](methods-codex.md), 사용
-가능한 pretrained weight는 [backbones.md](backbones.md)를 기준으로 한다. 재조립 카테고리,
-custom model의 component 공유 관계와 ablation 설계는
-[model-assembly-analysis.md](model-assembly-analysis.md)를 따른다.
+구성하던 이전 설계안이다. 당시 방법론 후보와 구현 상세는
+[methods-codex.md](methods-codex.md), 당시 weight 정보는
+[backbones.md](../references/backbones.md)를 기준으로 했다.
 
 핵심 설계는 학습 model을 backbone, backbone adapter, 선택적 decoder 또는 neck, prediction
 head로 조립하고, loss와 postprocess를 model 밖에서 독립적으로 관리하는 것이다. 주요 method
@@ -137,7 +142,7 @@ input
 구성한다. 첫 baseline은 네 stage와 출력 stride 16을 사용하고, activation과 channel width는 config로
 관리한다. Decoder의 `DeconvBlock`은 `CustomBackbone`에 포함하지 않는다. `custom + coord_gap`을
 pretrained prior가 없는 프로젝트 기준 model로 사용한다. Block의 상세 계약과 custom `reg`, `seg`,
-`det` 공유 관계는 [model-assembly-analysis.md](model-assembly-analysis.md)를 따른다.
+`det` 공유 관계는 [model-assembly.md](../architecture/model-assembly.md)를 따른다.
 
 ### 3.2. torchvision CNN과 Transformer backbone
 
@@ -196,8 +201,8 @@ backbone:
 ```
 
 `name`은 architecture 식별자이며 파일명이나 절대 경로가 아니다. 다른 PC에서는 `weights`만
-변경하고 experiment identifier의 backbone 이름을 유지한다. weight URL, size와 SHA-256은
-`docs/backbones.md`를 따른다.
+변경하고 experiment identifier의 backbone 이름을 유지한다. Weight URL, size와 SHA-256은
+[backbones.md](../references/backbones.md)를 따른다.
 
 ## 4. Decoder와 Prediction Head
 
