@@ -311,13 +311,13 @@ Category A의 주요 조합은 다음과 같다.
 
 | 설계 명칭 | 조합 |
 |---|---|
-| `CustomRegModel` | `CustomBackbone + adapter + coord_gap/coord_spatial head` |
+| `RegModel` | `CustomBackbone + adapter + coord_gap/coord_spatial head` |
 | `CustomSegModel` | `CustomBackbone + adapter + SegDecoder + MaskHead` |
 | `CustomDetModel` | `CustomBackbone + adapter + multi-scale neck + DetectionHead` |
 
-### 4.2. CustomRegModel 조합
+### 4.2. RegModel 조합
 
-`CustomRegModel`은 decoder 없이 `FeatureBundle`의 `global` 또는 `spatial` field에서 coordinate를
+`RegModel`은 decoder 없이 `FeatureBundle`의 `global` 또는 `spatial` field에서 coordinate를
 예측한다.
 
 | variant | feature | head 구성 | raw output |
@@ -355,6 +355,28 @@ FeatureBundle.spatial and optional stages
 
 Custom detection은 external YOLO, torchvision detector나 DETR whole model과 구분한다. 외부 model의
 internal loss와 호출 규약은 Category C의 adapter가 처리한다.
+
+`CustomDetModel`의 raw output 표현은 `head` 파라미터로 `box`(기본값)와 `point` 중 선택한다. 다른
+method의 `head`가 network branch/module 선택인 것과 달리, det는 `DetectionHead` 하나만 사용하므로
+`head`가 그 안의 raw output 채널 구성을 선택하는 역할을 겸한다.
+
+| variant | box_conv 채널 | raw output |
+|---|---|---|
+| `box`(기본값) | 4 | corner class별 center offset과 box width/height |
+| `point` | 2 | corner class별 center offset만 |
+
+두 variant 모두 grid cell마다 corner class별 objectness(classification)와 center offset을
+예측하며, `box`는 여기에 box width/height 회귀를 추가한다. box width/height는 corner가 실제
+크기를 가진 object가 아니라 line-intersection point라는 점을 반영해 학습을 위한 인위적
+placeholder 값(기본값 0.1, 정규화 좌표계 기준)으로 취급하며, 이후 ablation 대상으로 남긴다.
+detection postprocessor는 confidence가 가장 높은 cell의 center offset만으로 corner를 decode하므로
+box width/height는 두 variant 모두에서 최종 corner 좌표에 영향을 주지 않는다. grid 해상도는
+`grid_stride` 파라미터로 노출하며 기본값은 16이다(6.2절 지원 대상 9개 backbone이 모두 stride 16
+stage를 직접 보유한다). box regression은 corner class에 무관한 채널을 공유한다.
+
+향후 Category C(외부 whole-model detector, YOLO/torchvision detector/DETR)를 추가하더라도 해당
+adapter는 항상 box 좌표만 출력하므로 `head`는 `box`로 고정된다. `seg`의 `TorchSegModel`이
+`head="mask"`로 고정되는 것과 같은 패턴이며, `head`에 Category C 전용 옵션이 늘어나지 않는다.
 
 ### 4.5. 공통 block 재사용 관계
 
@@ -477,7 +499,8 @@ Category B는 pretrained backbone을 사용하지만 project의 adapter, decoder
 | backbone family | adapter output | 주요 조합 |
 |---|---|---|
 | ResNet | `global`, `spatial`, `stages` | coordinate, dense decoder와 custom detection |
-| MobileNet/EfficientNet | `global`, `spatial`, 제한된 `stages` | coordinate와 lightweight dense model |
+| VGG | `global`, `spatial`, `stages` | coordinate와 multi-stage dense decoder |
+| MobileNet/EfficientNet | `global`, `spatial`, 제한된 `stages` | coordinate와 lightweight dense model, EfficientNet-B0 U-Net decoder |
 | ViT/DINOv2 | `global`, token-grid `spatial` | coordinate와 조건부 single-scale decoder |
 | Swin | `global`, `spatial`, `stages` | coordinate와 multi-stage dense decoder |
 
@@ -492,7 +515,8 @@ neck 또는 head가 담당한다.
 |---|---:|---:|---:|---:|
 | `CustomBackbone` | 지원 | 지원 | 지원 | 지원 |
 | ResNet | 지원 | 지원 | 지원 | 지원 |
-| MobileNet/EfficientNet | 지원 | 지원 | 조건부 | 조건부 |
+| VGG | 지원 | 지원 | 지원 | 지원 |
+| MobileNet/EfficientNet | 지원 | 지원 | 조건부 지원 | 조건부 |
 | ViT/DINOv2 | 지원 | 조건부 | 초기 제외 | 초기 제외 |
 | Swin | 지원 | 지원 | 지원 | 조건부 |
 
@@ -535,8 +559,30 @@ External whole-model 대상은 다음과 같다.
 | detection | Faster R-CNN, RetinaNet, YOLO | class mapping과 corner postprocessor |
 | set prediction | DETR box, 조건부 DETR point | query selection과 corner ordering |
 
+`TorchSegModel`은 torchvision segmentation whole model을 Category C `seg`, `usage=whole_model`
+variant로 감싼다. `SegModel`이 stage-returning backbone과 project `SegDecoder`를 조립하는 Category B
+model인 반면, `TorchSegModel`은 FCN, DeepLabV3, LR-ASPP 내부 encoder, decoder와 segmentation head의
+결합을 유지하고 native output의 `"out"` tensor만 `(B, 1, Hm, Wm)` mask logits contract로 변환한다.
+COCO pretrained classifier는 panel class와 직접 대응하지 않으므로 local checkpoint를 load한 뒤 binary
+mask classifier로 교체하고 project mask target으로 fine-tuning한다.
+
+`TorchDetModel`은 torchvision detection whole model(Faster R-CNN ResNet-50-FPN, RetinaNet
+ResNet-50-FPN, SSD300 VGG16)을 Category C `det`, `usage=whole_model` variant로 감싼다.
+`TorchSegModel`과 달리 native output이 `DetModel`의 grid 기반 `{"cls", "box"}` dense map이 아니라
+image당 가변 개수의 `{"boxes", "labels", "scores"}` 목록이므로, 기존 `DetPreprocessor`/
+`DetPostprocessor`/`FocalLoss`/`SmoothL1Loss`를 재사용하지 않고 `TorchDetPreprocessor`/
+`TorchDetPostprocessor`를 별도로 둔다. COCO pretrained classifier는 마지막 classifier layer를
+4개 corner class(+ package가 background class를 예약하면 1개 추가)로 교체해 project corner target으로
+fine-tuning한다. Faster R-CNN과 SSD300은 label 0을 background로 예약하므로 corner class `c`를
+label `c + 1`로, RetinaNet은 background class가 없으므로 corner class `c`를 label `c` 그대로
+매핑한다(package별 `label_offset`).
+
 Whole model의 internal loss를 사용하는 경우 `BaseWrapper` adapter가 loss dictionary를 공통 trainer에
-연결한다. Evaluator에는 package-native output을 직접 전달하지 않는다.
+연결한다. Evaluator에는 package-native output을 직접 전달하지 않는다. torchvision detection whole
+model은 `train()` mode에서만 `(images, targets)`를 함께 받아 native loss dict를 반환하고 `eval()`
+mode에서는 항상 예측 목록만 반환하므로, `TorchDetWrapper`는 `BaseWrapper.train_step`/`eval_step`을
+override해 이 비대칭을 흡수한다. validation loop에서는 native loss를 얻을 수 없으므로 valid loss
+column은 0으로 남고, 조기 종료는 공통 `PolygonIoU` metric만 사용한다.
 
 ### 7.3. 교체 가능한 요소와 제한 사항
 
@@ -754,7 +800,7 @@ latency와 model size를 보고한다. Dense model에는 raw representation metr
 - `CustomBackbone`의 stage channel width와 block 반복 수를 확정한다.
 - segmentation 기본 decoder를 plain과 U-Net additive skip 중에서 선택한다.
 - U-Net concatenation과 FPN을 정식 registry에 포함할지 결정한다.
-- Custom detection neck과 point 또는 box representation을 확정한다.
+- Custom detection neck과 point 또는 box head를 확정한다.
 - refinement의 joint training을 별도 연구 실험으로 진행할지 결정한다.
 
 기본 가정은 `DeconvBlock.mode=interpolate_conv`이며 additive skip U-Net은 segmentation 기본 후보일

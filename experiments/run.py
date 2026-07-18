@@ -15,7 +15,7 @@ from experiments.configs import CONFIGS
 MODES = ["train"]
 
 PASS_KEYS = [
-    "backbone", "head", "device", "batch_size", "max_epochs", "num_workers",
+    "backbone", "head", "model", "device", "batch_size", "max_epochs", "num_workers",
     "train_size", "valid_size", "test_size", "checkpoint", "output_dir",
 ]
 

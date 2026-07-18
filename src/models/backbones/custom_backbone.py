@@ -20,6 +20,8 @@ class CustomBackbone(BaseBackbone):
         self.stage4 = ConvBlock(stage_channels[2], stage_channels[3], kernel_size=3, stride=2)
         self.out_channels = stage_channels[3]
         self.out_stride = 16
+        self.stage_channels = stage_channels
+        self.stage_strides = (2, 4, 8, 16)
 
     def forward(self, images):
         x = self.stem(images)

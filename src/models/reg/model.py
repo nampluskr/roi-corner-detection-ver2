@@ -2,14 +2,16 @@
 
 from src.models.base.base_model import BaseModel
 from src.models.backbones.custom_backbone import CustomBackbone
-from src.models.backbones.torchvision_backbone import SUPPORTED_BACKBONES, TorchBackbone
+from src.models.backbones.torch_backbone import SUPPORTED_BACKBONES, VIT_BACKBONES, TorchBackbone
+from src.models.backbones.timm_backbone import SUPPORTED_TIMM_BACKBONES, TIMM_VIT_BACKBONES, TimmBackbone
 from src.models.adapters.cnn_adapter import CNNBackboneAdapter
+from src.models.adapters.transformer_adapter import TransformerBackboneAdapter
 from src.models.features import FeatureExtractor, FeatureSpec
 from src.models.heads.coordinate_head import CoordGapHead, CoordSpatialHead
 
 
-class CustomRegModel(BaseModel):
-    """Selectable backbone plus CNNBackboneAdapter feeding a coordinate head for direct corner regression."""
+class RegModel(BaseModel):
+    """Selectable backbone plus a matching adapter feeding a coordinate head for direct corner regression."""
 
     def __init__(self, in_channels=3, dropout=0.2, backbone="custom", head="coord_gap"):
         super().__init__()
@@ -21,18 +23,29 @@ class CustomRegModel(BaseModel):
         elif backbone in SUPPORTED_BACKBONES:
             encoder = TorchBackbone(backbone)
             backbone_name = backbone
+        elif backbone in SUPPORTED_TIMM_BACKBONES:
+            encoder = TimmBackbone(backbone)
+            backbone_name = backbone
         else:
-            supported = ("custom",) + SUPPORTED_BACKBONES
+            supported = ("custom",) + SUPPORTED_BACKBONES + SUPPORTED_TIMM_BACKBONES
             raise ValueError("Unknown reg backbone: %s. Supported: %s"
                              % (backbone, ", ".join(supported)))
 
+        is_vit = backbone in VIT_BACKBONES or backbone in TIMM_VIT_BACKBONES
+        adapter_name = "vit" if is_vit else "cnn"
         if head == "coord_gap":
-            adapter = CNNBackboneAdapter(keep_spatial=False, keep_stages=False)
-            spec = FeatureSpec(backbone_name, "cnn", global_channels=encoder.out_channels)
+            if is_vit:
+                adapter = TransformerBackboneAdapter(keep_spatial=False, keep_global=True)
+            else:
+                adapter = CNNBackboneAdapter(keep_spatial=False, keep_stages=False)
+            spec = FeatureSpec(backbone_name, adapter_name, global_channels=encoder.out_channels)
             coordinate_head = CoordGapHead(spec.global_channels, dropout=dropout)
         elif head == "coord_spatial":
-            adapter = CNNBackboneAdapter(keep_spatial=True, keep_stages=False)
-            spec = FeatureSpec(backbone_name, "cnn",
+            if is_vit:
+                adapter = TransformerBackboneAdapter(keep_spatial=True, keep_global=False)
+            else:
+                adapter = CNNBackboneAdapter(keep_spatial=True, keep_stages=False)
+            spec = FeatureSpec(backbone_name, adapter_name,
                                global_channels=encoder.out_channels,
                                spatial_channels=encoder.out_channels)
             coordinate_head = CoordSpatialHead(spec.spatial_channels, dropout=dropout)

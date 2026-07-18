@@ -1,7 +1,8 @@
-# src/models/backbones/torchvision_backbone.py: torchvision CNN backbone wrappers
+# src/models/backbones/torch_backbone.py: torchvision CNN backbone wrappers
 
 import os
 import torch
+import torch.nn as nn
 import torchvision.models as models
 
 from src.models.backbones.base_backbone import BaseBackbone
@@ -12,9 +13,9 @@ BACKBONE_WEIGHTS = {
     "resnet50": "/mnt/d/backbones/resnet50-0676ba61.pth",
     "efficientnet_b0": "/mnt/d/backbones/efficientnet_b0_rwightman-7f5810bc.pth",
     "vgg16": "/mnt/d/backbones/vgg16-397923af.pth",
-    "vgg16_bn": "/mnt/d/backbones/vgg16_bn-6c64b313.pth",
     "vgg19": "/mnt/d/backbones/vgg19-dcbb9e9d.pth",
-    "vgg19_bn": "/mnt/d/backbones/vgg19_bn-c79401a0.pth",
+    "vit_b_16": "/mnt/d/backbones/vit_b_16-c867db91.pth",
+    "swin_t": "/mnt/d/backbones/swin_t-704ceda3.pth",
 }
 
 BACKBONE_BUILDERS = {
@@ -23,15 +24,17 @@ BACKBONE_BUILDERS = {
     "resnet50": models.resnet50,
     "efficientnet_b0": models.efficientnet_b0,
     "vgg16": models.vgg16,
-    "vgg16_bn": models.vgg16_bn,
     "vgg19": models.vgg19,
-    "vgg19_bn": models.vgg19_bn,
+    "vit_b_16": models.vit_b_16,
+    "swin_t": models.swin_t,
 }
 
 SUPPORTED_BACKBONES = tuple(BACKBONE_BUILDERS.keys())
 RESNET_BACKBONES = ("resnet18", "resnet34", "resnet50")
 EFFICIENTNET_BACKBONES = ("efficientnet_b0",)
-VGG_BACKBONES = ("vgg16", "vgg16_bn", "vgg19", "vgg19_bn")
+VGG_BACKBONES = ("vgg16", "vgg19")
+VIT_BACKBONES = ("vit_b_16",)
+SWIN_BACKBONES = ("swin_t",)
 
 
 class TorchBackbone(BaseBackbone):
@@ -62,17 +65,33 @@ class TorchBackbone(BaseBackbone):
             self.stage_channels = self.resnet_stage_channels(backbone)
             self.stage_strides = (4, 8, 16, 32)
         elif backbone in EFFICIENTNET_BACKBONES:
-            self.family = "features"
+            self.family = "efficientnet"
             self.features = net.features
             self.out_channels = net.classifier[-1].in_features
-            self.stage_channels = (self.out_channels,)
-            self.stage_strides = (32,)
-        else:
-            self.family = "features"
+            self.stage_indices = (1, 2, 3, 5, 8)
+            self.stage_channels = (16, 24, 40, 112, 1280)
+            self.stage_strides = (2, 4, 8, 16, 32)
+        elif backbone in SWIN_BACKBONES:
+            self.family = "swin"
+            self.stem = net.features
+            self.norm = net.norm
+            self.out_channels = net.head.in_features
+            self.stage_indices = (1, 3, 5, 7)
+            self.stage_channels = (96, 192, 384, 768)
+            self.stage_strides = (4, 8, 16, 32)
+        elif backbone in VIT_BACKBONES:
+            self.family = "vit"
+            self.conv_proj = net.conv_proj
+            self.class_token = net.class_token
+            self.encoder = net.encoder
+            self.out_channels = net.hidden_dim
+            self.patch_size = net.patch_size
+        elif backbone in VGG_BACKBONES:
+            self.family = "vgg"
             self.features = net.features
             self.out_channels = 512
-            self.stage_channels = (self.out_channels,)
-            self.stage_strides = (32,)
+            self.stage_channels = (64, 128, 256, 512, 512)
+            self.stage_strides = (2, 4, 8, 16, 32)
         self.out_stride = 32
 
     def load_local_weights(self, net, path):
@@ -87,9 +106,44 @@ class TorchBackbone(BaseBackbone):
         return (256, 512, 1024, 2048)
 
     def forward(self, images):
-        if self.family == "features":
-            final = self.features(images)
-            return {"final": final, "stages": [final]}
+        if self.family == "efficientnet":
+            x = images
+            stages = []
+            for i, layer in enumerate(self.features):
+                x = layer(x)
+                if i in self.stage_indices:
+                    stages.append(x)
+            return {"final": stages[-1], "stages": stages}
+
+        if self.family == "swin":
+            x = images
+            stages = []
+            for i, layer in enumerate(self.stem):
+                x = layer(x)
+                if i in self.stage_indices:
+                    stage = x
+                    if i == self.stage_indices[-1]:
+                        stage = self.norm(stage)
+                    stages.append(stage.permute(0, 3, 1, 2).contiguous())
+            return {"final": stages[-1], "stages": stages}
+
+        if self.family == "vit":
+            n = images.shape[0]
+            patches = self.conv_proj(images).flatten(2).transpose(1, 2)
+            cls = self.class_token.expand(n, -1, -1)
+            tokens = self.encoder(torch.cat([cls, patches], dim=1))
+            grid_h = images.shape[2] // self.patch_size
+            grid_w = images.shape[3] // self.patch_size
+            return {"cls": tokens[:, 0], "tokens": tokens[:, 1:], "grid_size": (grid_h, grid_w)}
+
+        if self.family == "vgg":
+            x = images
+            stages = []
+            for layer in self.features:
+                x = layer(x)
+                if isinstance(layer, nn.MaxPool2d):
+                    stages.append(x)
+            return {"final": stages[-1], "stages": stages}
 
         x = self.conv1(images)
         x = self.bn1(x)
@@ -100,6 +154,3 @@ class TorchBackbone(BaseBackbone):
         s3 = self.layer3(s2)
         s4 = self.layer4(s3)
         return {"final": s4, "stages": [s1, s2, s3, s4]}
-
-
-TorchvisionBackbone = TorchBackbone

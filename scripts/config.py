@@ -36,11 +36,12 @@ def cfg_get(cfg, key, default=None):
 
 
 def get_experiment(cfg):
-    """Build an experiment name string from method, batch_size, max_epochs, backbone, and head."""
+    """Build an experiment name string from method, batch_size, max_epochs, model/backbone, and head."""
     method = cfg_get(cfg, "method", DEFAULTS["method"])
     batch_size = cfg_get(cfg, "batch_size", DEFAULTS["batch_size"])
     max_epochs = cfg_get(cfg, "max_epochs", DEFAULTS["max_epochs"])
-    backbone = cfg_get(cfg, "backbone", DEFAULTS["backbone"]) or DEFAULTS["backbone"]
+    model = cfg_get(cfg, "model", None)
+    backbone = model or cfg_get(cfg, "backbone", DEFAULTS["backbone"]) or DEFAULTS["backbone"]
     head = cfg_get(cfg, "head", DEFAULTS["head"]) or DEFAULTS["head"]
     return "%s_bs%d_ep%d_%s_%s" % (method, batch_size, max_epochs, backbone, head)
 
@@ -69,6 +70,8 @@ def get_wrapper_kwargs(args):
         kwargs["backbone"] = args.backbone
     if getattr(args, "head", None):
         kwargs["head"] = args.head
+    if getattr(args, "model", None):
+        kwargs["model"] = args.model
     return kwargs
 
 
