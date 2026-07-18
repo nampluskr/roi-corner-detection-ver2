@@ -18,6 +18,8 @@ docs/
 │   ├── model-usage-codex.md
 │   ├── src-layout-claude.md
 │   └── src-layout-codex.md
+├── plans/
+│   └── 0001-src-implementation-plan.md
 ├── references/
 │   └── backbones.md
 └── README.md

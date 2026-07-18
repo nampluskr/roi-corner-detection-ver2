@@ -66,7 +66,44 @@ outputs/<dataset>/<method>/<model>/<exp_name>/
 - `src/` 내부 import는 `src.xxx` 형식의 absolute import를 사용한다.
 - `scripts/`, `experiments/`에서는 project root를 `sys.path`에 추가한 뒤 `src.xxx`로 import한다.
 
-## 5. 동기화 규칙
+## 5. 실행 환경
+
+Python 실행과 검증은 conda 환경 `pytorch_env`를 사용한다. 코드 실행, `python -c` 검증,
+스크립트 실행 전에 먼저 이 환경을 활성화한다.
+
+```bash
+conda activate pytorch_env
+```
+
+## 6. Plan 문서 규칙
+
+Canonical 문서를 갱신할 정도의 실제 작업(구현, 구조 변경, 문서 체계 확장 등)은 실행 전에
+`docs/plans/`의 계획 문서에 범위와 완료 기준을 기록하고 검토와 승인을 받는다. 요구사항이나 설계가
+바뀌면 코드보다 canonical 문서를 먼저 수정한다.
+
+계획 문서의 경로와 명명 규칙은 다음과 같다.
+
+- 경로: `docs/plans/NNNN-topic-plan.md`
+- 번호 `NNNN`은 4자리 0-padding이며 순증가한다. 번호를 재사용하거나 삭제하지 않는다.
+- 상태는 `Draft`, `Approved`, `Done` 중 하나를 사용한다.
+- 완료된 plan도 파일을 지우지 않고 이력으로 보존한다.
+
+각 plan 문서는 다음 구성 요소를 갖춘다.
+
+- 표준 헤더 표: 상태, 작성일, 적용 범위, 관련 문서
+- 목적과 배경: 이 작업이 왜 필요한지
+- 범위: 포함 항목과 제외 항목(후속 plan에서 수행)을 구분해서 기록
+- 완료 기준: 무엇이 충족되면 이 plan을 `Done`으로 볼 수 있는지
+- 검증: 빌드/테스트 방법, 또는 문서 생성만이면 그 사실과 확인 항목
+
+작업 순서는 다음과 같다.
+
+1. 작업 전에 관련 plan이 있는지 `docs/plans/`를 확인한다.
+2. 없으면 새 `NNNN-topic-plan.md` 초안을 작성해 사용자에게 검토와 승인을 받는다.
+3. 승인된 plan을 기준으로 canonical 문서를 먼저 갱신하고, 이후 코드를 구현한다.
+4. 구현 결과에 맞게 관련 검증을 수행하고 plan의 상태를 갱신한다(`Draft` -> `Approved` -> `Done`).
+
+## 7. 동기화 규칙
 
 `CLAUDE.md`와 `AGENTS.md`는 같은 작업 지침의 동기화 사본이다. 한 파일의 내용이 변경되면 같은
 작업에서 다른 파일을 동일한 내용으로 갱신하고 SHA-256으로 byte-level 일치를 검증한다.
