@@ -62,6 +62,7 @@ class Trainer:
 
         self.wrapper.on_fit_start(max_epochs)
         for epoch in range(1, max_epochs + 1):
+            self.wrapper.on_epoch_start(epoch)
             train_result = self.train(train_loader)
             for k, v in train_result.items():
                 history["train"].setdefault(k, []).append(v)
@@ -89,6 +90,7 @@ class Trainer:
 
         self.wrapper.on_fit_start(max_epochs)
         for epoch in range(1, max_epochs + 1):
+            self.wrapper.on_epoch_start(epoch)
             train_result = self.train(train_loader)
             for k, v in train_result.items():
                 history["train"].setdefault(k, []).append(v)

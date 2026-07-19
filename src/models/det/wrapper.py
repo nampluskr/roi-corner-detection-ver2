@@ -24,8 +24,10 @@ class DetWrapper(BaseWrapper):
     def __init__(self, in_channels=3, backbone="custom", head="box", model=None, neck_channels=256,
                  grid_stride=16, box_size=0.1, image_size=224,
                  optimizer=None, scheduler=None, preprocessor=None, postprocessor=None,
-                 losses=None, metrics=None, device=None):
+                 losses=None, metrics=None, device=None, warmup_epochs=None):
         # model kwarg accepted for CLI compatibility with get_wrapper_kwargs; DetModel has no variants
+        # warmup_epochs kwarg accepted for CLI compatibility; DetModel trains from scratch and has
+        # no pretrained backbone to freeze
         model = DetModel(in_channels=in_channels, backbone=backbone, neck_channels=neck_channels,
                           grid_stride=grid_stride, head=head)
         preprocessor = preprocessor or DetPreprocessor(
@@ -53,7 +55,7 @@ class TorchDetWrapper(BaseWrapper):
 
     def __init__(self, backbone=None, head="box", model=None, box_size=0.1, image_size=224,
                  optimizer=None, scheduler=None, preprocessor=None, postprocessor=None,
-                 metrics=None, device=None):
+                 metrics=None, device=None, warmup_epochs=1):
         # backbone/head kwargs accepted for CLI compatibility with get_wrapper_kwargs; unused here
         net = TorchDetModel(model=model)
         preprocessor = preprocessor or TorchDetPreprocessor(
@@ -61,12 +63,32 @@ class TorchDetWrapper(BaseWrapper):
         postprocessor = postprocessor or TorchDetPostprocessor(
             image_size=image_size, label_offset=net.label_offset)
         super().__init__(net, preprocessor, postprocessor, optimizer=optimizer,
-                          scheduler=scheduler, losses=None, metrics=metrics, device=device)
-        self.set_optimizer(self.optimizer or AdamW(self.model.parameters(), lr=1e-4))
-        self.set_scheduler(self.scheduler or ReduceLROnPlateau(
-            self.optimizer, mode="max", factor=0.5, patience=2,
-            threshold=1e-4, threshold_mode="abs", min_lr=1e-7))
+                          scheduler=scheduler, losses=None, metrics=metrics, device=device,
+                          warmup_epochs=warmup_epochs)
+        self.applied_warmup_epochs = warmup_epochs
+        if self.optimizer is None:
+            phase = 1 if warmup_epochs > 0 else 2
+            self.set_optimizer(self.build_optimizer(phase))
+        if self.scheduler is None:
+            self.set_scheduler(self.build_scheduler(self.optimizer))
         self.set_metrics(self.metrics or {"iou": PolygonIoU()})
+
+    def get_backbone_module(self):
+        return self.model.net.backbone
+
+    def build_optimizer(self, phase):
+        backbone_ids = {id(p) for p in self.get_backbone_module().parameters()}
+        other_params = [p for p in self.model.parameters() if id(p) not in backbone_ids]
+        if phase == 1:
+            return AdamW(other_params, lr=1e-4)
+        return AdamW([
+            {"params": self.get_backbone_module().parameters(), "lr": 1e-5},
+            {"params": other_params, "lr": 1e-4},
+        ])
+
+    def build_scheduler(self, optimizer):
+        return ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2,
+                                 threshold=1e-4, threshold_mode="abs", min_lr=1e-7)
 
     def train_step(self, images, targets):
         self.model.train()
@@ -82,7 +104,7 @@ class TorchDetWrapper(BaseWrapper):
 
         for name, value in loss_dict.items():
             self.losses.setdefault(name, BaseLoss()).update(value.item(), len(images))
-        return {**self.get_loss_results(), **self.get_metric_results()}
+        return self.get_loss_results()
 
     @torch.no_grad()
     def eval_step(self, images, targets):
@@ -106,7 +128,7 @@ class YoloDetWrapper(BaseWrapper):
 
     def __init__(self, backbone=None, head="box", model=None, box_size=0.3, image_size=224,
                  optimizer=None, scheduler=None, preprocessor=None, postprocessor=None,
-                 metrics=None, device=None):
+                 metrics=None, device=None, warmup_epochs=1):
         # backbone/head kwargs accepted for CLI compatibility with get_wrapper_kwargs; unused here
         # box_size defaults larger than TorchDetWrapper's 0.1: dense-anchor assigner needs
         # enough positive matches for target_scores_sum to stay well above 1
@@ -114,12 +136,38 @@ class YoloDetWrapper(BaseWrapper):
         preprocessor = preprocessor or YoloDetPreprocessor(box_size=box_size)
         postprocessor = postprocessor or YoloDetPostprocessor(image_size=image_size)
         super().__init__(net, preprocessor, postprocessor, optimizer=optimizer,
-                          scheduler=scheduler, losses=None, metrics=metrics, device=device)
-        self.set_optimizer(self.optimizer or AdamW(self.model.parameters(), lr=1e-4))
-        self.set_scheduler(self.scheduler or ReduceLROnPlateau(
-            self.optimizer, mode="max", factor=0.5, patience=2,
-            threshold=1e-4, threshold_mode="abs", min_lr=1e-7))
+                          scheduler=scheduler, losses=None, metrics=metrics, device=device,
+                          warmup_epochs=warmup_epochs)
+        self.applied_warmup_epochs = warmup_epochs
+        if self.optimizer is None:
+            phase = 1 if warmup_epochs > 0 else 2
+            self.set_optimizer(self.build_optimizer(phase))
+        if self.scheduler is None:
+            self.set_scheduler(self.build_scheduler(self.optimizer))
         self.set_metrics(self.metrics or {"iou": PolygonIoU()})
+
+    def get_backbone_layers(self):
+        return list(self.model.net.model[:-1])
+
+    def set_backbone_trainable(self, trainable):
+        for layer in self.get_backbone_layers():
+            for p in layer.parameters():
+                p.requires_grad = trainable
+
+    def build_optimizer(self, phase):
+        backbone_ids = {id(p) for layer in self.get_backbone_layers() for p in layer.parameters()}
+        other_params = [p for p in self.model.parameters() if id(p) not in backbone_ids]
+        if phase == 1:
+            return AdamW(other_params, lr=1e-4)
+        backbone_params = [p for layer in self.get_backbone_layers() for p in layer.parameters()]
+        return AdamW([
+            {"params": backbone_params, "lr": 1e-5},
+            {"params": other_params, "lr": 1e-4},
+        ])
+
+    def build_scheduler(self, optimizer):
+        return ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2,
+                                 threshold=1e-4, threshold_mode="abs", min_lr=1e-7)
 
     def build_batch(self, images, targets):
         batch = self.preprocessor(targets)
@@ -143,7 +191,7 @@ class YoloDetWrapper(BaseWrapper):
         self.optimizer.step()
 
         self.update_yolo_losses(loss_detach, len(images))
-        return {**self.get_loss_results(), **self.get_metric_results()}
+        return self.get_loss_results()
 
     @torch.no_grad()
     def eval_step(self, images, targets):
@@ -171,7 +219,31 @@ class YoloDetWrapper(BaseWrapper):
 class DetrDetWrapper(BaseWrapper):
     """Wraps DetrDetModel with Hugging Face native Hungarian loss semantics."""
 
-    def build_optimizer(self):
+    def __init__(self, backbone=None, head="box", model=None, box_size=0.3, image_size=224,
+                 optimizer=None, scheduler=None, preprocessor=None, postprocessor=None,
+                 metrics=None, device=None, grad_clip=1.0, warmup_epochs=1):
+        # backbone/head/image_size kwargs accepted for CLI compatibility; unused by HF DETR here
+        net = DetrDetModel(model=model)
+        preprocessor = preprocessor or DetrDetPreprocessor(box_size=box_size)
+        postprocessor = postprocessor or DetrDetPostprocessor()
+        super().__init__(net, preprocessor, postprocessor, optimizer=optimizer,
+                          scheduler=scheduler, losses=None, metrics=metrics, device=device,
+                          warmup_epochs=warmup_epochs)
+        self.grad_clip = grad_clip
+        self.applied_warmup_epochs = warmup_epochs
+        if self.optimizer is None:
+            phase = 1 if warmup_epochs > 0 else 2
+            self.set_optimizer(self.build_optimizer(phase))
+        if self.scheduler is None:
+            self.set_scheduler(self.build_scheduler(self.optimizer))
+        self.set_metrics(self.metrics or {"iou": PolygonIoU()})
+
+    def set_backbone_trainable(self, trainable):
+        for name, param in self.model.named_parameters():
+            if name.startswith("net.model.backbone"):
+                param.requires_grad = trainable
+
+    def build_optimizer(self, phase):
         """Return DETR fine-tuning parameter groups with conservative pretrained-model learning rates."""
         backbone_params, classifier_params, other_params = [], [], []
         for name, param in self.model.named_parameters():
@@ -183,27 +255,20 @@ class DetrDetWrapper(BaseWrapper):
                 classifier_params.append(param)
             else:
                 other_params.append(param)
+        if phase == 1:
+            return AdamW([
+                {"params": other_params, "lr": 1e-4},
+                {"params": classifier_params, "lr": 1e-4},
+            ], weight_decay=1e-4)
         return AdamW([
             {"params": backbone_params, "lr": 1e-5},
             {"params": other_params, "lr": 1e-4},
             {"params": classifier_params, "lr": 1e-4},
         ], weight_decay=1e-4)
 
-    def __init__(self, backbone=None, head="box", model=None, box_size=0.3, image_size=224,
-                 optimizer=None, scheduler=None, preprocessor=None, postprocessor=None,
-                 metrics=None, device=None, grad_clip=1.0):
-        # backbone/head/image_size kwargs accepted for CLI compatibility; unused by HF DETR here
-        net = DetrDetModel(model=model)
-        preprocessor = preprocessor or DetrDetPreprocessor(box_size=box_size)
-        postprocessor = postprocessor or DetrDetPostprocessor()
-        super().__init__(net, preprocessor, postprocessor, optimizer=optimizer,
-                          scheduler=scheduler, losses=None, metrics=metrics, device=device)
-        self.grad_clip = grad_clip
-        self.set_optimizer(self.optimizer or self.build_optimizer())
-        self.set_scheduler(self.scheduler or ReduceLROnPlateau(
-            self.optimizer, mode="max", factor=0.5, patience=2,
-            threshold=1e-4, threshold_mode="abs", min_lr=1e-7))
-        self.set_metrics(self.metrics or {"iou": PolygonIoU()})
+    def build_scheduler(self, optimizer):
+        return ReduceLROnPlateau(optimizer, mode="max", factor=0.5, patience=2,
+                                 threshold=1e-4, threshold_mode="abs", min_lr=1e-7)
 
     def update_detr_losses(self, loss_dict, count):
         for name, value in loss_dict.items():
@@ -223,7 +288,7 @@ class DetrDetWrapper(BaseWrapper):
         self.optimizer.step()
 
         self.update_detr_losses(output.loss_dict, len(images))
-        return {**self.get_loss_results(), **self.get_metric_results()}
+        return self.get_loss_results()
 
     @torch.no_grad()
     def eval_step(self, images, targets):

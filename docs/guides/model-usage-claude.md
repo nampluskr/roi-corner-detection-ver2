@@ -128,10 +128,10 @@ model size를 함께 본다. mask나 heatmap 같은 dense model은 raw represent
 이 절은 canonical 문서의 ablation matrix(section 11.4)를 따라 축별 비교 방법을 설명한다. 각
 비교는 그 축만 바꾸고 나머지를 고정한다.
 
-### 5.1. head 비교 (coord_gap 대 coord_spatial)
+### 5.1. head 비교 (gap 대 spatial)
 
-`reg` method에서 backbone과 target과 loss와 postprocess를 고정하고 head만 `coord_gap`과
-`coord_spatial`로 바꾼다. global aggregation과 spatial 정보 유지의 차이를 본다.
+`reg` method에서 backbone과 target과 loss와 postprocess를 고정하고 head만 `gap`과
+`spatial`로 바꾼다. global aggregation과 spatial 정보 유지의 차이를 본다.
 
 ### 5.2. decoder와 skip 비교 (plain 대 U-Net add)
 

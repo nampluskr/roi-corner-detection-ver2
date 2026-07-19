@@ -56,6 +56,9 @@ def get_wrapper(method, device=None, **kwargs):
     if method == "seg":
         from src.models.seg.wrapper import SegWrapper
         return SegWrapper(device=device, **kwargs)
+    if method == "heatmap":
+        from src.models.heatmap.wrapper import HeatmapWrapper
+        return HeatmapWrapper(device=device, **kwargs)
     if method == "det":
         from src.models.det.model import (
             SUPPORTED_DETRDET_MODELS, SUPPORTED_TORCHDET_MODELS, SUPPORTED_YOLODET_MODELS,

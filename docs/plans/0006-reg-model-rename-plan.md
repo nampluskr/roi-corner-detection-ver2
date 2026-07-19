@@ -21,6 +21,9 @@ backbone)와 Category B(pretrained backbone)가 같은 `FeatureBundle` 계약과
 정의하는데, 현재 구현은 이 둘을 이미 하나의 class로 통합해 다루고 있다. `CustomRegModel`이라는
 이름은 이제 실제 지원 범위보다 좁게 표현되므로 `RegModel`로 바꾼다.
 
+이 통합 결정은 이후 [docs/plans/0019-reg-model-split-plan.md](0019-reg-model-split-plan.md)에서
+`CustomRegModel`과 `TorchRegModel`로 다시 나뉘었다.
+
 ## 2. 범위
 
 이번 plan에 포함하는 항목은 다음과 같다.

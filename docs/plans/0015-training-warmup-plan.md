@@ -4,10 +4,13 @@
 
 | 항목 | 값 |
 |---|---|
-| 상태 | Draft |
+| 상태 | Superseded |
 | 작성일 | 2026-07-19 |
 | 적용 범위 | `docs/architecture/model-assembly.md`, `docs/guides/model-usage-codex.md`, `docs/guides/model-usage-claude.md`, `experiments/configs.py`, `experiments/run.py`, `scripts/config.py`, `src/core/trainer.py`, `src/models/base/base_wrapper.py`, `src/models/reg/wrapper.py`, `src/models/seg/wrapper.py`, `src/models/det/wrapper.py` |
 | 관련 문서 | [docs/architecture/model-assembly.md](../architecture/model-assembly.md), [docs/plans/0003-reg-backbone-experiments-plan.md](0003-reg-backbone-experiments-plan.md), [docs/plans/0009-seg-unet-backbone-plan.md](0009-seg-unet-backbone-plan.md), [docs/plans/0010-torchseg-model-plan.md](0010-torchseg-model-plan.md), [docs/plans/0011-det-custom-model-plan.md](0011-det-custom-model-plan.md) |
+
+이 plan은 [docs/plans/0020-reg-two-stage-training-plan.md](0020-reg-two-stage-training-plan.md)로
+대체됐다. 아래 본문은 작성 시점의 초안을 historical record로 보존한다.
 
 ## 1. 목적과 배경
 
@@ -72,9 +75,13 @@ optimizer policy는 다음 표의 기준을 따른다.
 
 | model 종류 | 조건 | `warmup_epochs` 적용 | 기본 optimizer policy |
 |---|---|---|---|
-| custom composable | `backbone="custom"`과 `model.extractor` 있음 | 적용하지 않음 | `single_lr`, 전체 parameter `lr=1e-4` |
-| pretrained composable | `backbone!="custom"`과 `model.extractor` 있음 | 적용함 | `differential_lr`, extractor `lr=1e-5`, non-backbone `lr=1e-4` |
+| custom composable | `isinstance(self.model, CustomRegModel)`(reg 기준, seg/det는 대응하는 custom model class) | 적용하지 않음 | `single_lr`, 전체 parameter `lr=1e-4` |
+| pretrained composable | custom model class가 아니고 `model.extractor` 있음(`TorchRegModel` 포함) | 적용함 | `differential_lr`, extractor `lr=1e-5`, non-backbone `lr=1e-4` |
 | external whole model | `model.extractor` 없음 | 적용하지 않음 | `single_lr`, 전체 parameter `lr=1e-4` |
+
+reg는 `RegModel`이 `CustomRegModel`과 `TorchRegModel`로 나뉘어 있으므로([docs/plans/0019-reg-model-split-plan.md](0019-reg-model-split-plan.md))
+판정 기준이 `backbone` 문자열 비교가 아니라 class 비교다. seg와 det는 아직 문자열/`hasattr` 기준을
+유지하며, 각 method가 custom/pretrained model class를 분리하는 시점에 동일한 방식으로 옮겨간다.
 
 `head`라는 이름은 method에 따라 실제 범위가 달라질 수 있으므로, 구현과 문서에서는 extractor를 제외한
 parameter group을 `non_backbone`으로 부른다. `reg`에서는 coordinate head에 가깝고, `seg`에서는 decoder와
@@ -122,11 +129,14 @@ for epoch in 1..max_epochs:
 ### 3.4. method wrapper별 optimizer 정책
 
 `RegWrapper`, `SegWrapper`, `DetWrapper`는 `warmup_epochs=0` kwarg를 받는다. wrapper는 model 생성 후
-backbone 종류와 `extractor` 존재 여부에 따라 실제 적용 policy를 정한다.
+model class와 `extractor` 존재 여부에 따라 실제 적용 policy를 정한다.
 
-`RegWrapper`와 `DetWrapper`는 항상 composable model이므로 `backbone == "custom"` 여부로 기본 optimizer를
-나눈다. `SegWrapper`는 `SegModel`과 `TorchSegModel`을 모두 다루므로 `hasattr(self.model, "extractor")`와
-`backbone == "custom"`을 함께 확인한다.
+`RegWrapper`는 `CustomRegModel`과 `TorchRegModel`을 모두 다루므로 `isinstance(self.model, CustomRegModel)`
+여부로 기본 optimizer를 나눈다 - `CustomRegModel`이면 warmup을 적용하지 않고 단일 learning rate를
+쓰고, `TorchRegModel`이면 warmup을 적용하고 differential learning rate를 쓴다. `DetWrapper`는 아직
+`DetModel` 하나만 다루므로 `backbone == "custom"` 여부로 기본 optimizer를 나눈다. `SegWrapper`는
+`SegModel`과 `TorchSegModel`을 모두 다루므로 `hasattr(self.model, "extractor")`와 `backbone == "custom"`을
+함께 확인한다.
 
 pretrained composable model의 optimizer group 구성은 기존 계약을 유지한다.
 

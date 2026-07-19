@@ -16,7 +16,7 @@ MODES = ["train"]
 
 PASS_KEYS = [
     "backbone", "head", "model", "device", "batch_size", "max_epochs", "num_workers",
-    "train_size", "valid_size", "test_size", "checkpoint", "output_dir",
+    "train_size", "valid_size", "test_size", "checkpoint", "output_dir", "warmup_epochs",
 ]
 
 

@@ -15,12 +15,13 @@ DEFAULTS = dict(
     dataset="public",
     method="reg",
     backbone="custom",
-    head="coord_gap",
+    head="gap",
     model=None,
     image_size=224,
     batch_size=4,
     max_epochs=5,
     patience=2,
+    warmup_epochs=1,
     num_workers=4,
     train_size=2000,  # None: all train samples
     valid_size=1000,  # None: all valid samples
@@ -72,6 +73,8 @@ def get_wrapper_kwargs(args):
         kwargs["head"] = args.head
     if getattr(args, "model", None):
         kwargs["model"] = args.model
+    if getattr(args, "method", None) in ("reg", "seg", "det", "heatmap") and getattr(args, "warmup_epochs", None) is not None:
+        kwargs["warmup_epochs"] = args.warmup_epochs
     return kwargs
 
 
@@ -92,6 +95,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int)
     parser.add_argument("--max_epochs", type=int)
     parser.add_argument("--patience", type=int)
+    parser.add_argument("--warmup_epochs", type=int)
     parser.add_argument("--num_workers", type=int)
     parser.add_argument("--train_size", type=int)
     parser.add_argument("--valid_size", type=int)

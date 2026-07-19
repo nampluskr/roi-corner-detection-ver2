@@ -173,8 +173,8 @@ python scripts/train.py \
 
 ```bash
 python scripts/evaluate.py \
-  --config outputs/measured/reg/custom_coord_gap/baseline/resolved_config.yaml \
-  --checkpoint outputs/measured/reg/custom_coord_gap/baseline/model.pth \
+  --config outputs/measured/reg/custom_gap/baseline/resolved_config.yaml \
+  --checkpoint outputs/measured/reg/custom_gap/baseline/model.pth \
   --save
 ```
 
@@ -187,8 +187,8 @@ Label이 없는 image CSV에도 같은 checkpoint를 사용할 수 있다.
 
 ```bash
 python scripts/predict.py \
-  --config outputs/measured/reg/custom_coord_gap/baseline/resolved_config.yaml \
-  --checkpoint outputs/measured/reg/custom_coord_gap/baseline/model.pth \
+  --config outputs/measured/reg/custom_gap/baseline/resolved_config.yaml \
+  --checkpoint outputs/measured/reg/custom_gap/baseline/model.pth \
   --set data.has_corners=false \
   --save
 ```
@@ -293,7 +293,7 @@ table로 보고한다.
 
 | 고정 요소 | 변경 요소 | 확인 항목 |
 |---|---|---|
-| CustomBackbone, initialization, target, Wing loss, postprocess와 data split | `coord_gap`, `coord_spatial` | spatial 정보가 corner precision에 미치는 영향 |
+| CustomBackbone, initialization, target, Wing loss, postprocess와 data split | `gap`, `spatial` | spatial 정보가 corner precision에 미치는 영향 |
 
 Parameter 수와 latency도 기록해 spatial head의 정확도 이득과 비용을 분리한다.
 

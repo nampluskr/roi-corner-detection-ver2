@@ -7,15 +7,33 @@ class BaseWrapper:
     """Base class resolving device placement and exposing train/eval/predict step methods."""
 
     def __init__(self, model, preprocessor, postprocessor, optimizer=None,
-                 scheduler=None, losses=None, metrics=None, device=None):
+                 scheduler=None, losses=None, metrics=None, device=None, warmup_epochs=0):
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = model.to(self.device)
         self.preprocessor = preprocessor
         self.postprocessor = postprocessor
+        self.warmup_epochs = warmup_epochs
+        self.applied_warmup_epochs = 0
         self.set_optimizer(optimizer)
         self.set_scheduler(scheduler)
         self.set_losses(losses)
         self.set_metrics(metrics)
+
+    def get_backbone_module(self):
+        return getattr(self.model, "extractor", None)
+
+    def set_backbone_trainable(self, trainable):
+        backbone = self.get_backbone_module()
+        if backbone is None:
+            return
+        for p in backbone.parameters():
+            p.requires_grad = trainable
+
+    def build_optimizer(self, phase):
+        raise NotImplementedError
+
+    def build_scheduler(self, optimizer):
+        raise NotImplementedError
 
     def set_optimizer(self, optimizer):
         self.optimizer = optimizer
@@ -59,7 +77,19 @@ class BaseWrapper:
         return {name: metric.compute() for name, metric in self.metrics.items()}
 
     def on_fit_start(self, max_epochs):
-        pass
+        if self.applied_warmup_epochs <= 0:
+            return
+        self.set_backbone_trainable(False)
+        self.set_optimizer(self.build_optimizer(phase=1))
+        self.set_scheduler(self.build_scheduler(self.optimizer))
+
+    def on_epoch_start(self, epoch):
+        if self.applied_warmup_epochs <= 0:
+            return
+        if epoch == self.applied_warmup_epochs + 1:
+            self.set_backbone_trainable(True)
+            self.set_optimizer(self.build_optimizer(phase=2))
+            self.set_scheduler(self.build_scheduler(self.optimizer))
 
     def on_epoch_end(self, valid_score=None):
         if self.scheduler is None:
