@@ -67,4 +67,12 @@ DET_CONFIGS = [
     # {"method": "det", "model": "yolov8n", "batch_size": 4, "max_epochs": 5, "backbone": "", "head": "box"},
 ]
 
+# method comparison templates; keep separate from the active CONFIGS queue
+METHOD_COMPARISON_CONFIGS = [
+    # {"method": "reg", "backbone": "custom", "head": "gap", "batch_size": 4, "test_size": 1000, "checkpoint": "outputs/public/reg/custom_gap/example/model.pth"},
+    # {"method": "seg", "backbone": "custom", "head": "mask", "batch_size": 4, "test_size": 1000, "checkpoint": "outputs/public/seg/custom_mask/example/model.pth"},
+    # {"method": "det", "backbone": "custom", "head": "box", "batch_size": 4, "test_size": 1000, "checkpoint": "outputs/public/det/custom_box/example/model.pth"},
+    # {"method": "heatmap", "backbone": "custom", "head": "heatmap", "batch_size": 4, "test_size": 1000, "checkpoint": "outputs/public/heatmap/custom_heatmap/example/model.pth"},
+]
+
 CONFIGS = REG_CONFIGS + SEG_CONFIGS + HEATMAP_CONFIGS + DET_CONFIGS

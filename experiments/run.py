@@ -9,10 +9,10 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from scripts.config import get_experiment
+from scripts.config import get_experiment, get_output_dir
 from experiments.configs import CONFIGS
 
-MODES = ["train"]
+MODES = ["train", "evaluate", "predict"]
 
 PASS_KEYS = [
     "backbone", "head", "model", "device", "batch_size", "max_epochs", "num_workers",
@@ -20,17 +20,22 @@ PASS_KEYS = [
 ]
 
 
-def get_cli_args(cfg):
-    """Return CLI args for scripts/train.py built from one config dict."""
-    args = ["--method", cfg["method"], "--save"]
+def get_cli_args(cfg, mode):
+    """Return CLI args for one mode script built from one config dict."""
+    args = ["--method", cfg["method"]]
+    if mode == "train":
+        args.append("--save")
     for key in PASS_KEYS:
         if key in cfg:
             args += ["--%s" % key, str(cfg[key])]
+    if mode in ("evaluate", "predict") and not cfg.get("checkpoint"):
+        output_dir = cfg.get("output_dir") or get_output_dir(cfg)
+        args += ["--checkpoint", os.path.join(output_dir, "model.pth")]
     return args
 
 
 def run(mode, configs):
-    """Run scripts/train.py for each config via subprocess and report a summary."""
+    """Run one mode script for each config via subprocess and report a summary."""
     script = os.path.join("scripts", "%s.py" % mode)
     total = len(configs)
     results = []
@@ -38,7 +43,7 @@ def run(mode, configs):
     for i, cfg in enumerate(configs, 1):
         exp_name = get_experiment(cfg)
         print("\n[%d/%d] %s | %s" % (i, total, mode, exp_name))
-        cmd = [sys.executable, script] + get_cli_args(cfg)
+        cmd = [sys.executable, script] + get_cli_args(cfg, mode)
         try:
             subprocess.run(cmd, check=True)
             results.append({"exp_name": exp_name, "success": True, "error": None})
