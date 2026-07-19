@@ -570,12 +570,12 @@ mask classifier로 교체하고 project mask target으로 fine-tuning한다.
 ResNet-50-FPN, SSD300 VGG16)을 Category C `det`, `usage=whole_model` variant로 감싼다.
 `TorchSegModel`과 달리 native output이 `DetModel`의 grid 기반 `{"cls", "box"}` dense map이 아니라
 image당 가변 개수의 `{"boxes", "labels", "scores"}` 목록이므로, 기존 `DetPreprocessor`/
-`DetPostprocessor`/`FocalLoss`/`SmoothL1Loss`를 재사용하지 않고 `TorchDetPreprocessor`/
-`TorchDetPostprocessor`를 별도로 둔다. COCO pretrained classifier는 마지막 classifier layer를
-4개 corner class(+ package가 background class를 예약하면 1개 추가)로 교체해 project corner target으로
-fine-tuning한다. Faster R-CNN과 SSD300은 label 0을 background로 예약하므로 corner class `c`를
-label `c + 1`로, RetinaNet은 background class가 없으므로 corner class `c`를 label `c` 그대로
-매핑한다(package별 `label_offset`).
+`DetPostprocessor`/`FocalLoss`/`SmoothL1Loss`를 재사용하지 않고, 같은 `preprocessor.py`/
+`postprocessor.py` 파일 안에 별도 class `TorchDetPreprocessor`/`TorchDetPostprocessor`를 둔다.
+COCO pretrained classifier는 마지막 classifier layer를 4개 corner class(+ package가 background
+class를 예약하면 1개 추가)로 교체해 project corner target으로 fine-tuning한다. Faster R-CNN과
+SSD300은 label 0을 background로 예약하므로 corner class `c`를 label `c + 1`로, RetinaNet은
+background class가 없으므로 corner class `c`를 label `c` 그대로 매핑한다(package별 `label_offset`).
 
 Whole model의 internal loss를 사용하는 경우 `BaseWrapper` adapter가 loss dictionary를 공통 trainer에
 연결한다. Evaluator에는 package-native output을 직접 전달하지 않는다. torchvision detection whole
@@ -583,6 +583,36 @@ model은 `train()` mode에서만 `(images, targets)`를 함께 받아 native los
 mode에서는 항상 예측 목록만 반환하므로, `TorchDetWrapper`는 `BaseWrapper.train_step`/`eval_step`을
 override해 이 비대칭을 흡수한다. validation loop에서는 native loss를 얻을 수 없으므로 valid loss
 column은 0으로 남고, 조기 종료는 공통 `PolygonIoU` metric만 사용한다.
+
+`YoloDetModel`은 Ultralytics YOLOv8-Nano(`ultralytics.nn.tasks.DetectionModel`)를 Category C `det`,
+`usage=whole_model` variant로 감싼다. `TorchDetModel`과 달리 backbone, neck과 detection head가
+하나의 anchor-free single-stage 구조로 결합되어 있고, native output도 torchvision의 가변 개수
+`{"boxes", "labels", "scores"}` 목록이 아니라 `train()` mode에서 raw dict
+`{"boxes", "scores", "feats"}`(anchor별 undecoded box regression과 class logit)를, `eval()` mode에서
+`(decoded_tensor, raw dict)` 2-tuple을 반환하므로, 같은 `preprocessor.py`/`postprocessor.py` 파일
+안에 별도 class `YoloDetPreprocessor`/`YoloDetPostprocessor`를 둔다. COCO pretrained classifier는
+`Detect` head의 per-scale classification branch(`cv3`) 마지막 `Conv2d`만 4개 corner class로 교체하고,
+class-agnostic box regression branch(`cv2`)는 그대로 재사용해 project corner target으로
+fine-tuning한다. corner는 실제 넓이를 가진 object가 아니므로 `TorchDetPreprocessor`처럼 고정 크기
+normalized pseudo-box(`box_size`)로 변환해 Ultralytics native loss(`v8DetectionLoss`, box/cls/dfl
+3-항 합) 입력을 구성한다.
+
+Ultralytics native loss는 `DetectionModel.loss(batch, preds=...)`로 노출되며 `train()`/`eval()` 양쪽
+raw dict를 그대로 받아들이므로, `YoloDetWrapper`는 `TorchDetWrapper`와 달리 validation loop에서도
+native loss(box/cls/dfl)를 채운다. box 좌표 decode와 NMS는 eval-mode `decoded_tensor`에 대해서만
+수행하며, `YoloDetPostprocessor`가 class별 최고 score box의 중심점을 공통 `(N,4,2)` corners contract로
+변환한다.
+
+`DetrDetModel`은 Hugging Face `transformers.DetrForObjectDetection`을 Category C `det`,
+`usage=whole_model` variant로 감싼다. 프로젝트는 `/mnt/d/backbones/facebook-detr-resnet-50` local
+snapshot을 `local_files_only=True`로 로드하고, COCO classifier를 4-class corner classifier로
+교체한다. Hugging Face DETR가 제공하는 Hungarian matching 기반 native loss를 `DetrDetWrapper`에서
+train과 validation 양쪽에 연결한다. 같은 `preprocessor.py`/`postprocessor.py` 파일 안의 별도 class인
+`DetrDetPreprocessor`는 corner를 고정 크기 pseudo-box label로 변환하고, `DetrDetPostprocessor`는
+no-object class를 제외한 corner class별 최고 score query를 선택하고, 해당 query의 normalized box
+center를 공통 `(N,4,2)` corner contract로 변환한다. Fine-tuning은 pretrained DETR 본체의 box
+output이 불안정해지지 않도록 backbone, transformer와 새 classifier에 서로 다른 learning rate를
+적용하고 gradient clipping을 사용한다.
 
 ### 7.3. 교체 가능한 요소와 제한 사항
 

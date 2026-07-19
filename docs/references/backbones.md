@@ -2,7 +2,7 @@
 tags: [roi-corner-detection, backbones, pretrained-weights]
 status: reference
 created: 2026-07-12
-updated: 2026-07-15
+updated: 2026-07-19
 ---
 
 # Backbone 가중치 카탈로그
@@ -111,8 +111,9 @@ fringe line을 우선 검출하므로 mask boundary band 또는 fringe suppressi
 | `fasterrcnn_resnet50_fpn_coco-258fb6c6.pth`<br>167,502,836 B | Faster R-CNN ResNet-50-FPN, COCO detection | `TorchDetModel`, `box_predictor`를 5-class(background+corner 4개)로 교체, `label_offset=1` | [PyTorch](https://download.pytorch.org/models/fasterrcnn_resnet50_fpn_coco-258fb6c6.pth) | `258fb6c638b15964ddcdd1ae0748c5eef1be9e732750120cc857feed3faac384` |
 | `retinanet_resnet50_fpn_coco-eeacb38b.pth`<br>136,595,076 B | RetinaNet ResNet-50-FPN, COCO detection | `TorchDetModel`, `classification_head`를 4-class(background 없음)로 교체, `label_offset=0` | [PyTorch](https://download.pytorch.org/models/retinanet_resnet50_fpn_coco-eeacb38b.pth) | `eeacb38b7cec8cf93c57867e05eaab621047f19b0d2ec5accaa405f690da15b7` |
 | `ssd300_vgg16_coco-b556d3b4.pth`<br>142,594,222 B | SSD300 VGG16, COCO detection | `TorchDetModel`, `classification_head`를 5-class로 교체, `label_offset=1`, 입력이 내부에서 항상 300x300으로 강제 resize됨(교체 불가), CPU 비용 큼 | [PyTorch](https://download.pytorch.org/models/ssd300_vgg16_coco-b556d3b4.pth) | `b556d3b43ab6c3f63d81bfb8835fe8756ac22da664357da100dccf96b6a6b42d` |
-| `yolov8n.pt`<br>6,549,796 B | Ultralytics YOLOv8-Nano, COCO detection | `det` YOLO corner box fine-tuning | [Ultralytics](https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt) | `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36` |
-| `detr-r50-e632da11.pth`<br>166,618,694 B | DETR ResNet-50, COCO detection | `det` DETR box 초기화와 조건부 point head 학습 | [Meta](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth) | `e632da11ec76ae67bac2f8579fbed3724e08dead7d200ca13e019b197784eadc` |
+| `yolov8n.pt`<br>6,549,796 B | Ultralytics YOLOv8-Nano, COCO detection | `YoloDetModel`, detection head를 4-class(corner)로 교체, `pytorch_env`에 `ultralytics --no-deps` 설치 필요(기존 `torch 2.5.1+cu121`/`torchvision 0.20.1+cu121` CUDA 빌드 보존), 자세한 계획은 [0014-det-yolo-model-plan.md](../plans/0014-det-yolo-model-plan.md) 참조 | [Ultralytics](https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8n.pt) | `f59b3d833e2ff32e194b5bb8e08d211dc7c5bdf144b90d2c8412c47ccfc83b36` |
+| `detr-r50-e632da11.pth`<br>166,618,694 B | DETR ResNet-50, COCO detection | 보존용. 0016 폐기로 이번 `DetrDetModel` 구현에서는 사용하지 않음 | [Meta](https://dl.fbaipublicfiles.com/detr/detr-r50-e632da11.pth) | `e632da11ec76ae67bac2f8579fbed3724e08dead7d200ca13e019b197784eadc` |
+| `facebook-detr-resnet-50/config.json`<br>4,592 B<br>`facebook-detr-resnet-50/model.safetensors`<br>166,587,896 B<br>`facebook-detr-resnet-50/preprocessor_config.json`<br>290 B | Hugging Face `facebook/detr-resnet-50`, COCO detection | `DetrDetModel`, `transformers.DetrForObjectDetection`, local snapshot load, classifier를 4-class(corner)로 교체, 자세한 계획은 [0017-det-hf-detr-model-plan.md](../plans/0017-det-hf-detr-model-plan.md) 참조 | [config](https://huggingface.co/facebook/detr-resnet-50/resolve/main/config.json)<br>[model](https://huggingface.co/facebook/detr-resnet-50/resolve/main/model.safetensors)<br>[preprocessor](https://huggingface.co/facebook/detr-resnet-50/resolve/main/preprocessor_config.json) | `e7bcf3992363f27717a863f14b193140ad2e41d4338ee012730e58a92cae17e6`<br>`830f5e2eeaada8c8c8281779dcc8ab12833972eb8514ed0a35be6c1d4420ad81`<br>`0673fea2a6d3cf92cdbab3c7426c0ecdf8a4729a2a4d5199033dcd66a2b8759b` |
 | `mlsd_large_512_fp32.pth`<br>6,341,481 B | M-LSD large, line segment detection | `line` ablation만 가능, exact upstream release 미확정 | 검증된 직접 URL 없음 | `5696f168eb2c30d4374bbfd45436f7415bb4d88da29bea97eea0101520fba082` |
 
 ## 4. 비권장 또는 비관련 가중치
@@ -131,9 +132,10 @@ fringe line을 우선 검출하므로 mask boundary band 또는 fringe suppressi
 
 ## 5. 파일 무결성 검증 결과
 
-현재 `/mnt/d/backbones`에서 확장자 `.pth`, `.pt`, `.pckl`, `.safetensors`인 파일은 46개다.
-각 표의 byte size와 SHA-256은 2026-07-12에 로컬 파일 전체를 다시 계산한 결과다. torchvision과
-DETR 파일명에 포함된 짧은 hash는 배포 식별자이며, 표의 SHA-256은 전체 파일 검증값이다.
+현재 `/mnt/d/backbones`에서 확장자 `.pth`, `.pt`, `.pckl`, `.safetensors`인 파일은 47개다.
+각 표의 byte size와 SHA-256은 2026-07-12와 2026-07-19에 로컬 파일 전체를 다시 계산한 결과다.
+torchvision과 DETR 파일명에 포함된 짧은 hash는 배포 식별자이며, 표의 SHA-256은 전체 파일
+검증값이다.
 
 다른 PC에서 timm safe tensor artifact를 복원할 때는 표의 `model.safetensors`뿐 아니라 같은
 Hugging Face model ID의 `config.json`도 함께 보관하는 것을 권장한다. 현재 로컬 디렉터리 이름이

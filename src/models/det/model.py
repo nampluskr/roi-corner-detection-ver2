@@ -2,10 +2,12 @@
 
 import os
 import torch
+import torch.nn as nn
 import torchvision.models.detection as detection
 from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
 from torchvision.models.detection.retinanet import RetinaNetClassificationHead
 from torchvision.models.detection.ssd import SSDClassificationHead
+from ultralytics.cfg import get_cfg
 
 from src.models.base.base_model import BaseModel
 from src.models.backbones.custom_backbone import CustomBackbone
@@ -36,6 +38,16 @@ TORCHDET_LABEL_OFFSET = {
     "ssd300_vgg16": 1,
 }
 SUPPORTED_TORCHDET_MODELS = tuple(TORCHDET_WEIGHTS.keys())
+
+YOLODET_WEIGHTS = {
+    "yolov8n": "/mnt/d/backbones/yolov8n.pt",
+}
+SUPPORTED_YOLODET_MODELS = tuple(YOLODET_WEIGHTS.keys())
+
+DETRDET_MODEL_DIR = {
+    "detr_resnet50": "/mnt/d/backbones/facebook-detr-resnet-50",
+}
+SUPPORTED_DETRDET_MODELS = tuple(DETRDET_MODEL_DIR.keys())
 
 
 class DetModel(BaseModel):
@@ -133,3 +145,78 @@ class TorchDetModel(BaseModel):
         if self.training and targets is not None:
             return self.net(images, targets)
         return self.net(images)
+
+
+class YoloDetModel(BaseModel):
+    """Ultralytics YOLOv8 whole detection model adapted to 4 corner classes via head replacement."""
+
+    def __init__(self, model="yolov8n"):
+        super().__init__()
+        model = model or "yolov8n"
+        if model not in YOLODET_WEIGHTS:
+            raise ValueError("Unknown yolodet model: %s. Supported: %s"
+                              % (model, ", ".join(SUPPORTED_YOLODET_MODELS)))
+
+        self.model_name = model
+        self.net = self.build_model(YOLODET_WEIGHTS[model])
+
+    def build_model(self, path):
+        if not os.path.exists(path):
+            raise FileNotFoundError("Local yolodet weight not found: %s" % path)
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        net = ckpt["model"].float()
+        # Ultralytics saves inference checkpoints with requires_grad=False on every
+        # parameter (deploy-only assumption); this project fine-tunes the whole net.
+        net.requires_grad_(True)
+        self.replace_classifier(net, NUM_CORNER_CLASSES)
+        net.args = get_cfg()
+        return net
+
+    def replace_classifier(self, net, num_classes):
+        detect = net.model[-1]
+        for seq in detect.cv3:
+            in_channels = seq[-1].in_channels
+            seq[-1] = nn.Conv2d(in_channels, num_classes, kernel_size=1)
+        detect.nc = num_classes
+        detect.no = num_classes + detect.reg_max * 4
+        net.nc = num_classes
+        net.names = {i: "corner%d" % i for i in range(num_classes)}
+        net.yaml["nc"] = num_classes
+
+    def forward(self, images):
+        return self.net(images)
+
+
+class DetrDetModel(BaseModel):
+    """Hugging Face DETR whole detection model adapted to 4 corner classes."""
+
+    def __init__(self, model="detr_resnet50"):
+        super().__init__()
+        model = model or "detr_resnet50"
+        if model not in DETRDET_MODEL_DIR:
+            raise ValueError("Unknown detrdet model: %s. Supported: %s"
+                              % (model, ", ".join(SUPPORTED_DETRDET_MODELS)))
+
+        self.model_name = model
+        self.net = self.build_model(DETRDET_MODEL_DIR[model])
+
+    def build_model(self, path):
+        if not os.path.isdir(path):
+            raise FileNotFoundError("Local detrdet snapshot not found: %s" % path)
+        try:
+            from transformers import DetrForObjectDetection
+        except ImportError as e:
+            raise ImportError("DetrDetModel requires transformers installed in pytorch_env") from e
+
+        id2label = {i: "corner%d" % i for i in range(NUM_CORNER_CLASSES)}
+        label2id = {v: k for k, v in id2label.items()}
+        return DetrForObjectDetection.from_pretrained(
+            path,
+            id2label=id2label,
+            label2id=label2id,
+            ignore_mismatched_sizes=True,
+            local_files_only=True,
+        )
+
+    def forward(self, images, labels=None):
+        return self.net(pixel_values=images, labels=labels)

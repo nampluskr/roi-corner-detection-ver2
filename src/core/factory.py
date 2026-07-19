@@ -57,10 +57,18 @@ def get_wrapper(method, device=None, **kwargs):
         from src.models.seg.wrapper import SegWrapper
         return SegWrapper(device=device, **kwargs)
     if method == "det":
-        from src.models.det.model import SUPPORTED_TORCHDET_MODELS
+        from src.models.det.model import (
+            SUPPORTED_DETRDET_MODELS, SUPPORTED_TORCHDET_MODELS, SUPPORTED_YOLODET_MODELS,
+        )
         if kwargs.get("model") in SUPPORTED_TORCHDET_MODELS:
             from src.models.det.wrapper import TorchDetWrapper
             return TorchDetWrapper(device=device, **kwargs)
+        if kwargs.get("model") in SUPPORTED_YOLODET_MODELS:
+            from src.models.det.wrapper import YoloDetWrapper
+            return YoloDetWrapper(device=device, **kwargs)
+        if kwargs.get("model") in SUPPORTED_DETRDET_MODELS:
+            from src.models.det.wrapper import DetrDetWrapper
+            return DetrDetWrapper(device=device, **kwargs)
         from src.models.det.wrapper import DetWrapper
         return DetWrapper(device=device, **kwargs)
     raise NotImplementedError("method not yet implemented: %s" % method)

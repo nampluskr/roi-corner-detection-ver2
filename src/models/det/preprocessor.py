@@ -1,10 +1,11 @@
-# src/models/det/preprocessor.py: convert standard corners into per-cell classification and box/point targets
+# src/models/det/preprocessor.py: convert standard corners into det variant training targets
 
 import torch
 
 from src.models.base.base_preprocessor import BasePreprocessor
 
 BOX_CHANNELS = {"box": 4, "point": 2}
+NUM_CORNER_CLASSES = 4
 
 
 class DetTarget(dict):
@@ -51,3 +52,61 @@ class DetPreprocessor(BasePreprocessor):
 
         pos_mask = cls_target.amax(dim=1, keepdim=True)
         return DetTarget(cls=cls_target, box=box_target, pos_mask=pos_mask)
+
+
+class TorchDetPreprocessor(BasePreprocessor):
+    """Turns each of the 4 corners into a fixed-size pseudo-box target for torchvision detection models."""
+
+    def __init__(self, image_size=224, box_size=0.1, label_offset=1):
+        self.image_size = image_size
+        self.box_pixels = box_size * image_size
+        self.label_offset = label_offset
+
+    def __call__(self, corners):
+        half = self.box_pixels / 2
+        labels = torch.arange(NUM_CORNER_CLASSES, device=corners.device) + self.label_offset
+        targets = []
+        for sample in corners:
+            cx = sample[:, 0] * self.image_size
+            cy = sample[:, 1] * self.image_size
+            boxes = torch.stack([cx - half, cy - half, cx + half, cy + half], dim=1)
+            targets.append({"boxes": boxes, "labels": labels})
+        return targets
+
+
+class YoloDetPreprocessor(BasePreprocessor):
+    """Turns each of the 4 corners into a fixed-size normalized pseudo-box for Ultralytics loss."""
+
+    def __init__(self, box_size=0.1):
+        self.box_size = box_size
+
+    def __call__(self, corners):
+        batch_idx, cls, bboxes = [], [], []
+        for i, sample in enumerate(corners):
+            n = sample.shape[0]
+            batch_idx.append(torch.full((n,), i, dtype=torch.float32, device=corners.device))
+            cls.append(torch.arange(NUM_CORNER_CLASSES, dtype=torch.float32, device=corners.device))
+            wh = torch.full((n, 2), self.box_size, device=corners.device)
+            bboxes.append(torch.cat([sample, wh], dim=1))
+        return {
+            "batch_idx": torch.cat(batch_idx),
+            "cls": torch.cat(cls),
+            "bboxes": torch.cat(bboxes),
+        }
+
+
+class DetrDetPreprocessor(BasePreprocessor):
+    """Turns each of the 4 corners into a fixed-size normalized pseudo-box label for DETR."""
+
+    def __init__(self, box_size=0.1):
+        self.box_size = box_size
+
+    def __call__(self, corners):
+        labels = torch.arange(NUM_CORNER_CLASSES, dtype=torch.long, device=corners.device)
+        targets = []
+        for sample in corners:
+            centers = sample[:NUM_CORNER_CLASSES].clamp(0.0, 1.0)
+            wh = torch.full((NUM_CORNER_CLASSES, 2), self.box_size, device=corners.device)
+            boxes = torch.cat([centers, wh], dim=1)
+            targets.append({"class_labels": labels, "boxes": boxes})
+        return targets
